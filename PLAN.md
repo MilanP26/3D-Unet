@@ -1,8 +1,9 @@
 # Seeded 3D U-Net for Pristionchus Neuron Segmentation — Development Plan
 
-Status: **planning only, no model code yet.** This document is the result of inspecting the
-repo and the data pushed into it so far, plus the data layout described by the researcher. It
-is meant to be updated as more datasets and answers to open questions come in.
+Status: **implemented and verified against real data (2026-07-07); paused before a real
+training run, which will happen on a lab GPU machine.** See section 13 for what was built,
+what was measured, and what to do on the GPU machine. Sections 0-12 below are the original
+design plan and are kept as-is since they're still the rationale behind the implementation.
 
 ## 0. What inspection actually found (ground truth as of 2026-07-07)
 
@@ -314,3 +315,81 @@ Two distinct inference contexts now that Phase A/B are separated:
 Setting up a local Python environment (`numpy`, `wkw`, `Pillow`/`tifffile`, `torch`) is the
 natural next practical step to start answering #2, #3, #6, and to run the alignment-verification
 check in §11 — held until you confirm you want to move past planning.
+
+---
+
+## 13. Implementation status, real measurements, and GPU handoff (2026-07-07)
+
+The plan above became code in `src/seeded_unet/` (see [README.md](README.md) for usage). This
+section records what actually got verified/measured, superseding the corresponding guesses in
+sections 0-12 where they differ.
+
+### What's built
+
+`stack_io.py` (discover/decode/cache stacks + dedup shared raw EM) · `seeds.py` (synthetic
+interior-biased seed sampling + anisotropic Gaussian heatmap) · `dataset.py` (instance list,
+group-aware train/val split, patch sampling with disk-cached seed distributions) · `model.py`
+(anisotropic 3D U-Net, in-plane pooling before z-pooling) · `losses.py` (Dice+BCE, Dice/IoU
+metrics) · `train.py` / `infer.py` (CLIs with `tqdm` progress bars and a live per-epoch ETA) ·
+`scripts/inspect_data.py` (alignment verification + size stats) ·`scripts/train.py` /
+`scripts/infer.py` (entry points).
+
+### Resolved since sections 0-12 were written
+
+- **A third stack, `Catherine_Stack1`, arrived** and follows the same PNG+zip convention (70
+  slices, same 1024×1024, same 2/2/30 nm scale) — answers open question #1: yes, the convention
+  is holding.
+- **PNG/mask alignment is now directly verified, not just circumstantial**: decoding
+  `Juliet_Stack2`'s WKW mask and reading the voxel at webKnossos's own recorded anchor point for
+  segment 3 (x=778, y=29, z=46) returns label `3` exactly. Across all three stacks,
+  `scripts/inspect_data.py`'s anchor-point check passes for 85-97% of segments; the handful of
+  mismatches read as normal post-anchor edits (segment merges, or a region getting erased/
+  relabeled after the anchor was recorded), not a decoding bug.
+- **`Juliet_Stack2` and `Juliet_Stack3` share byte-identical raw EM** (confirmed by hashing the
+  PNGs) — two independent annotation passes over the same crop (Stack3 has far fewer segments
+  done, 20 vs. 70, i.e. it looks like an earlier/partial pass). `stack_io.group_stacks_by_raw_hash`
+  now assigns them the same `scene_group` automatically so a split can never separate them.
+- **Instance sizes vary far more than "one compact soma" implies**: some labeled segments span
+  nearly the full 1024×1024×Z crop (e.g. up to ~860×724×60 voxels) — almost certainly long
+  neurites, not somas. This confirmed the plan's §4 revision was right: a patch only needs to
+  show local context around the seed, and ground truth is just the mask intersected with the
+  patch window, not the whole instance.
+- **Segment validity** (open question #2) still has no researcher-provided rule, so the code
+  defaults to a voxel-count threshold (`--min-instance-voxels`, default 500) and otherwise trusts
+  every labeled ID equally, named or not. `scripts/inspect_data.py` reports how many segments per
+  stack are explicitly named/colored (4-24 of them) so this can be revisited.
+- **Compute** (open question #5): resolved — real training will run on a GPU machine in the lab,
+  not this laptop (which has no CUDA GPU, only integrated AMD graphics).
+
+### Real CPU timing (this laptop, no GPU) — why full-size training needs the GPU machine
+
+| Config | patch (Z,Y,X) | base_channels | measured cost |
+|---|---|---|---|
+| toy smoke test | 16×64×64 | 8 | ~159s/epoch (train+val), 260+33 batches |
+| timing probe | 24×128×128 | 16 | ~4.7s/batch (train), ~23 min/epoch extrapolated |
+| **default** (`train.py` as shipped) | 32×256×256 | 24 | **not run to completion on CPU** — extrapolated ~12x the timing-probe's per-batch cost (more voxels + wider channels), i.e. very roughly **hours per epoch** |
+
+There is also a one-time, patch-size-independent setup cost the first time seed distributions
+are computed for a given `--min-instance-voxels`/`--interior-bias`: a distance transform per
+instance (~4 minutes for the current 163 instances across 3 stacks). This is now cached to disk
+under `.cache/seed_dist/`, so it only pays once ever, not once per run.
+
+**Conclusion: iterate on this laptop with a small patch/model (like the timing-probe config) if
+you want to sanity-check changes quickly; do the real training run on the lab GPU machine with
+the defaults (or larger).**
+
+### Running this on the lab GPU machine
+
+1. Copy the whole repo (or `git clone`/`git pull` it there) — `Training Data/` and the code are
+   both small enough to live in git; `.cache/` and `outputs/` are gitignored and will just
+   regenerate locally.
+2. `py -m pip install -r requirements.txt` (this installs the CPU build of `torch` by default on
+   most platforms via plain `pip install torch` — if the lab machine's CUDA version needs a
+   specific wheel, install torch first from https://pytorch.org/get-started/locally/ for that
+   machine's CUDA version, *then* `pip install -r requirements.txt` for the rest).
+3. `py scripts/train.py` — device is auto-detected; it will print `Using device: cuda` if torch
+   sees a GPU. No code changes needed to switch machines.
+4. Expect the ~4 minute one-time seed-distribution setup cost to repeat once on that machine
+   (its own `.cache/` starts empty), then real per-epoch timing that should be dramatically
+   faster than the CPU numbers above — worth re-measuring a couple of epochs before committing to
+   a long run, the same way the timing probe was used here.
