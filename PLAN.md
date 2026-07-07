@@ -1,306 +1,316 @@
 # Seeded 3D U-Net for Pristionchus Neuron Segmentation — Development Plan
 
 Status: **planning only, no model code yet.** This document is the result of inspecting the
-repo and the one annotation package currently checked in, plus the data layout described by
-the researcher. It is meant to be updated as more datasets and answers to open questions come in.
+repo and the data pushed into it so far, plus the data layout described by the researcher. It
+is meant to be updated as more datasets and answers to open questions come in.
 
 ## 0. What inspection actually found (ground truth as of 2026-07-07)
 
-The repo (`3D-Unet`) contained only a `README.md` until `Juliet_stack2.zip` (2.6 MB) was pushed.
-Extracting it:
+### 0.1 Repo layout, current state
 
 ```
-Juliet_stack2.zip
-├── Juliet_stack2.nml        # webKnossos annotation metadata (XML)
-└── data_Volume.zip          # webKnossos volume-annotation data, WKW format
+3D-Unet/
+├── README.md
+├── PLAN.md
+└── Training Data/
+    └── Juliet_Stack2/
+        ├── README.md                                    # currently empty
+        ├── Juliet_stack2.zip                             # webKnossos annotation export
+        └── ppa_b4v5s13_head_volume_export_s0573.png ... s0632.png   # 60 raw EM slices
 ```
 
-**`Juliet_stack2.nml`** is a *webKnossos volume annotation* export, not a skeleton file:
-- `<scale x="2.0" y="2.0" z="30.0" unit="nanometer"/>` — voxels are **highly anisotropic**:
-  2 nm × 2 nm in-plane, 30 nm in z (15× coarser in z). This is typical serial-section EM and
-  materially affects patch shape, convolution kernels, and augmentation choices (see §6).
-- `<volume id="0" name="Volume" location="data_Volume.zip" format="wkw" largestSegmentId="70">`
-  — one volume/segmentation layer, 70 segment IDs.
-- A `<segments>` list of 70 entries, each with an `anchorPosition` (voxel coords) and creation
-  timestamp; only ~15 of the 70 have an explicit `color.*` and/or a `name="Segment N"` attribute
-  — the rest are default/unnamed. This means **not all 70 IDs necessarily represent a
-  deliberately finished, identified neuron** — some may be scaffolding, accidental clicks, or
-  WIP. This needs a resolved convention before labels are trusted (see Open Questions).
-- There is **no `<trees>`/skeleton section** in this file — confirms the researcher's
-  description that VAST skeleton nodes and webKnossos coloring are two independent systems,
-  not two views of the same annotation file.
-- There is **no raw EM / "color" layer referenced anywhere in this file** — only the "Volume"
-  (label) layer.
+The intended convention going forward, per the researcher: `Training Data/<StackName>/` holds
+one self-contained annotated training example — a sequence of raw EM slice PNGs plus the
+webKnossos annotation zip for that same crop. More folders (`Juliet_Stack1`, `Juliet_Stack3`,
+others) will be added the same way. This is a deliberate, useful split:
 
-**`data_Volume.zip`** decodes to a WKW (webKnossos-wrapper) dataset:
-- Only a `1/` (mag-1, i.e. full resolution) folder — no downsampled mags, no
-  `datasource-properties.json` (which is where the layer's global bounding box / voxel dtype
-  / offset normally live at the dataset level).
-- Grid: `z0`, `z1` shard folders, each containing 32×32 `x*.wkw`/`y*.wkw` block files → standard
-  32³-voxel WKW buckets, so the annotated bounding box spans up to ~1024×1024×2048 voxels at
-  mag 1, but block file sizes are mostly ~555 bytes (near-empty/background) with only a handful
-  around 4.3 KB (actual labeled content) — **the real painted region is a small, sparse
-  sub-volume of that bounding box**, not the whole thing.
-- Header bytes (`57 4b 57 01 05 02 03 04...`) decode to WKW magic + version 1, and are
-  consistent with 32³ buckets — exact voxel dtype/channel count should be confirmed with the
-  `wkw`/`webknossos` Python libraries rather than assumed from a manual byte read.
-- **Confirms the researcher's suspicion: this annotation download contains only the
-  segmentation mask, not the raw EM image.** The raw EM must be fetched separately (same
-  `datasetId="6a3be4a7010000c801198b2b"`, same bounding box) via the webKnossos web UI/API,
-  or must already exist as a saved crop somewhere, or must be re-derived from the USB EM stack
-  if that stack is the same source data as what was uploaded to webKnossos.
+- **Phase A — Training (lives in this repo).** Small, cropped, fully self-contained
+  (image + mask) examples, each easily a few dozen–hundred MB. This is what the model trains on.
+- **Phase B — Skeletonizing / inference on the full worm (lives on the external hard drive).**
+  The full EM stack is far too large for GitHub and will never be checked in here; VAST and its
+  `.vsanno` skeleton files are how seed points get placed across the *whole* worm once a trained
+  model exists. This only needs to happen where the hard drive is attached.
 
-**Environment**: no Python interpreter, no `wkw`/`webknossos`/`torch`/`numpy` packages, and no
-GPU are currently set up in this workspace. Actual voxel-level inspection (label sizes, class
-balance, dtype confirmation) requires setting this up — noted as an action item, not done yet
-per the "don't implement yet" instruction.
+This distinction changes the plan meaningfully from the first pass: **training no longer
+depends on resolving VAST↔webKnossos coordinate alignment at all** (see §3) — that alignment
+problem only matters for Phase B, later. Details below.
 
-**Two independent annotation sources, confirmed:**
-| Source | Tool | Location | Contains | Content confirmed today |
+### 0.2 `Juliet_stack2.zip` (the annotation)
+
+Unchanged from the first inspection pass:
+- `Juliet_stack2.nml` is a webKnossos *volume* annotation (colored masks), not a skeleton file.
+  `<scale x="2.0" y="2.0" z="30.0" unit="nanometer"/>` — voxels are highly anisotropic (2 nm
+  in-plane, 30 nm in z). `<offset x="0" y="0" z="0"/>`.
+- `<volume id="0" name="Volume" location="data_Volume.zip" format="wkw" largestSegmentId="70">`,
+  with a `<segments>` list of 70 IDs, only ~15 of which have an explicit name/color — the rest
+  are unnamed/default, so not all 70 IDs are necessarily finished, trustworthy neuron labels.
+- `data_Volume.zip` decodes to a WKW dataset: mag-1 only, sharded into `z0`/`z1` folders of
+  32×32 buckets (32³ voxels each) → bounding box up to ~1024×1024×2048 voxels, but most buckets
+  are near-empty (~555 bytes compressed) with only a handful around 4.3 KB of real labeled
+  content — the actual painted region is a small, sparse sub-volume of that grid.
+- No `datasource-properties.json`, no raw/color layer referenced in the `.nml` — confirmed
+  again: **the annotation zip by itself still contains mask-only, no image data.**
+
+### 0.3 New finding: `Training Data/Juliet_Stack2/*.png` (the raw EM)
+
+60 PNGs, named `ppa_b4v5s13_head_volume_export_s0573.png` through `..._s0632.png`
+(573→632 inclusive = 60 slices). Checked the PNG header directly (IHDR chunk):
+**1024 × 1024 pixels, 8-bit, grayscale.**
+
+This is a strong, checkable alignment signal, not a coincidence:
+- 1024×1024 exactly matches the WKW bucket grid width computed above (32 buckets × 32 voxels).
+- 60 slices matches the z-extent implied by the segment anchor positions in the `.nml`
+  (z values observed in the 0–59 range).
+- `<offset x="0" y="0" z="0"/>` plus slice `s0573` being the first file is consistent with local
+  z=0 in the annotation corresponding to PNG `s0573`, i.e. **global slice index = local z + 573**.
+
+**This is strongly suggestive that the PNG stack and the WKW mask are the same crop, pixel-for-
+pixel, at offset (0,0)** — which would mean the raw-EM-missing problem from the first plan pass
+is solved for training purposes: this folder alone is enough to build (image, mask) training
+pairs without needing webKnossos API/raw-layer access at all. **This still needs an explicit
+verification step once decoding is implemented** (load the WKW label array, overlay a labeled
+slice's footprint on the corresponding PNG, and visually/numerically confirm the neuron outlines
+actually land on the right EM structures) before being trusted — matching dimensions and offsets
+is strong circumstantial evidence, not proof.
+
+The `s0573`-style numbering also looks like a **global** slice index into a larger source stack
+(`b4v5s13` reads like a block/volume/stack identifier), which — if confirmed — gives a
+ready-made z-anchor for later relating this crop back to the full hard-drive stack, even though
+the x/y crop origin within that larger stack is still unknown (not needed for training, but
+will matter for Phase B).
+
+### 0.4 Environment
+
+Still no Python interpreter, no `wkw`/`webknossos`/`torch`/`numpy`, no GPU set up in this
+workspace. Held as an action item, not done yet, per "don't implement yet."
+
+### 0.5 Updated picture of the two annotation/data systems
+
+| Source | Tool | Location | Used for | Status |
 |---|---|---|---|---|
-| Skeleton seed points | VAST | USB hard drive, `.vsanno` | ~206 skeleton nodes, one skeleton per neuron | not inspected (not accessible from this machine) |
-| Colored/manual masks | webKnossos | downloaded per-dataset zip, 1 pushed so far (+2-3 more to come) | per-voxel instance labels (`data_Volume.zip`, WKW) + metadata (`.nml`) | inspected above — mask only, no raw EM bundled |
-| Raw EM stack | — | USB hard drive (loaded into VAST); *may or may not* be same crop as webKnossos raw layer | full EM volume | not yet located/confirmed |
-
-This means the single biggest structural risk to this project is **coordinate alignment
-across three independently-addressed spaces** (VAST voxel space, webKnossos dataset space, and
-whatever the final training array uses) — flagged throughout below and called out first in
-Open Questions.
+| Cropped raw EM + colored mask pairs | webKnossos export | pushed into `Training Data/<Stack>/` in this repo | **Training (Phase A)** | 1 example (`Juliet_Stack2`) in; 2–3 more coming |
+| Full EM stack | VAST | USB hard drive | **Inference / skeletonizing whole worm (Phase B)** | not accessible from this machine |
+| Skeleton seed points (~206 nodes) | VAST, `.vsanno` | USB hard drive | **Phase B seeds**, and optionally later as a *validation* check on Phase A seed realism | not accessible from this machine |
 
 ---
 
 ## 1. Inspecting and understanding the data formats
 
-Concrete, tool-level steps (in order), to run once Python is set up:
+For **Phase A (training data, this repo)**, once Python is set up:
+1. Decode each `Training Data/<Stack>/*.png` slice sequence into a dense `(Z, Y, X)` uint8
+   raw-intensity volume (plain image I/O — no webKnossos API needed since the PNGs are already
+   exported raw pixels).
+2. Decode the matching `<Stack>.zip` → `.nml` + WKW volume into a dense instance-label array
+   using the `wkw` Python package, over the same bounding box as the PNG stack.
+3. **Verify alignment** (§0.3) — this is the first real coding task once implementation starts,
+   and everything else depends on it being true. If it's *not* aligned, the plan needs to
+   revisit how to get a matching raw layer per annotation.
+4. Cross-reference the WKW array's actual unique label IDs against the 70 IDs listed in the
+   `.nml`; compute a per-ID voxel-count histogram (validates data integrity, informs patch size
+   in §4/§6).
+5. Repeat 1–4 for each new `Training Data/<Stack>/` folder as it's added, and record per-stack
+   facts (scale, slice range, which segment IDs are trustworthy, annotation-completeness extent)
+   in a small manifest file per stack (e.g. `Training Data/<Stack>/manifest.yaml`) rather than
+   re-deriving by hand each time.
 
-1. **webKnossos volume annotation** (`data_Volume.zip` + `.nml`): use the `wkw` Python package
-   (or the higher-level `webknossos` client) to open the mag-1 layer and read it into a dense
-   `numpy` array over its bounding box. Cross-reference the resulting unique label IDs actually
-   present in the array against the 70 IDs listed in the `.nml` — some listed IDs may have zero
-   voxels (dead/empty segments), and some may be much smaller than others (specks vs. real
-   somas). Compute a size histogram per ID immediately; this both validates data integrity and
-   informs patch size (§4/§6).
-2. **webKnossos raw EM layer**: use the `webknossos` Python client with account credentials to
-   download the "color"/raw layer for the same `datasetId`, same bounding box as the volume
-   annotation, at the same mag. If the client can't reach a self-hosted instance
-   (`wkUrl="http://localhost:9000"` in the `.nml` suggests a local/self-hosted webKnossos, not
-   the public webknossos.org), determine correct host/credentials with the researcher first.
-3. **VAST `.vsanno` file** (on the USB drive, not accessible from here): open with VAST itself
-   or parse as text — VAST's native tracing export is a readable node list. Need to confirm
-   per node: neuron/skeleton identity, x/y/z coordinates, and the coordinate convention (raw
-   full-stack voxel indices? Some crop-relative offset? Physical units?). This needs to happen
-   on/near the machine with the USB drive.
-4. **Registration between VAST and webKnossos coordinate spaces**: once both are read, take a
-   handful of unambiguous shared landmarks (e.g., same neuron's centroid) if any exist, or use
-   the known EM stack geometry (crop offset, voxel size) written down when the crop was
-   uploaded to webKnossos, to derive the affine/offset mapping. This is the crux of the
-   pipeline — see Open Questions #1–3.
-5. Repeat steps 1–2 for each additional webKnossos dataset as it's pushed, and track per-dataset
-   scale/offset/datasetId in one manifest file (e.g. `datasets.yaml`) rather than re-deriving
-   each time by hand.
+For **Phase B (full-stack inference)**, later, not needed to start training:
+6. Parse the VAST `.vsanno` file (on the USB drive) to get `(neuron_id, x, y, z)` skeleton nodes
+   in VAST's native voxel space.
+7. Establish the mapping from VAST's full-stack coordinate space to whatever coordinate frame
+   the trained model's inference script expects (crop origin, scale/mag) — this is where the
+   VAST↔webKnossos alignment question that dominated the first plan pass actually matters, and
+   it can be deferred until there's a trained model ready to run on the full stack.
 
 ## 2. Manual colored annotation → 3D label masks
 
-- Decode the WKW volume layer into a dense instance-label numpy array per snippet (background =
-  0, other integers = instance IDs). Use the actual bounding box implied by populated buckets,
-  not the full shard grid, to avoid allocating a mostly-empty 1024×1024×2048 array.
-- Filter the 70 nml-listed IDs down to the set that actually has non-trivial voxel counts in the
-  decoded array; apply a minimum-voxel-count threshold to drop specks/accidental clicks (exact
-  threshold to be set once real size histogram is available).
-- For training, convert each retained instance ID into its own binary mask (`label == id`) on
-  demand rather than storing N separate dense volumes.
-- Assign each instance a **globally unique** neuron ID across all snippets/datasets (local IDs
-  1–70 are only unique within one snippet) — ideally tied to actual neuron identity/name if
-  known from the VAST skeleton labeling, since the eventual scientific goal is per-neuron
-  identity, not just arbitrary instance separation.
+- Decode the WKW volume layer into a dense instance-label numpy array per stack (background = 0,
+  integers = instance IDs), sized to the populated region rather than the full sparse shard grid.
+- Filter the `.nml`-listed IDs down to those with non-trivial voxel counts in the decoded array;
+  apply a minimum-voxel-count threshold to drop specks/accidental clicks.
+- Convert each retained instance ID into its own binary mask (`label == id`) on demand.
+- Assign each instance a **globally unique** neuron ID across all stacks (local IDs are only
+  unique within one stack) — tie to actual anatomical neuron identity if/when that's known,
+  since the eventual scientific goal is per-neuron identity, not just arbitrary instance
+  separation.
 - Decide and document a convention for which segments count as "finished, trustworthy" labels
-  (e.g., only those with an explicit name, or only those the researcher explicitly confirms) —
-  see Open Question #4.
+  (see Open Questions).
 
-## 3. VAST skeleton nodes → model input channel
+## 3. Seed channel construction
 
-- Parse `.vsanno` into `(neuron_id, x, y, z)` tuples in VAST's native voxel space.
-- Transform into each webKnossos snippet's local voxel grid using the offset/scale mapping from
-  §1.4. Only nodes that land inside a given snippet's bounding box are usable with that snippet.
-- Discard (or separately log) nodes that land outside any painted instance mask after transform
-  — these indicate either a registration error or a neuron VAST marked that wasn't colored in
-  webKnossos, both worth knowing about explicitly rather than silently training on them.
-- Seed channel encoding: build a single-channel volume the same shape as the image patch,
-  zero everywhere except a small blob at the seed location. Two options:
-  - **Binary point/dot** (simplest, but very sparse — extreme class imbalance in that channel
-    itself, and brittle to exact voxel-level jitter).
-  - **3D Gaussian heatmap**, sigma chosen in physical nm then converted to per-axis voxel sigma
-    given the 2/2/30 nm anisotropy (so the blob is physically round, not voxel-round) — this is
-    the standard choice in interactive/prompted segmentation literature and is the recommended
-    starting point.
-  - Treat the choice as an empirical hyperparameter to ablate once a baseline trains, not a
-    decision to over-engineer up front.
+**Training (Phase A) does not need real VAST coordinates at all.** Since ground-truth instance
+masks are already available for every training stack, seeds can be **synthetically sampled**
+from the interior of each labeled mask — this is the standard approach for training seed/point-
+conditioned segmentation models (used in interactive segmentation literature) and sidesteps the
+VAST↔webKnossos registration problem entirely for training:
+- For each training example, pick one or more interior points of a given instance mask (e.g.
+  uniformly random voxel inside the mask, or biased toward the medial/central region away from
+  the boundary, to mimic where a person tends to click) and use that as the seed for that patch.
+- Vary seed position per epoch (don't always use the same synthetic point for a given instance)
+  so the model doesn't overfit to one exact seed location per neuron, and so it learns to be
+  robust to seeds that land near an edge, not just dead-center.
+- Seed encoding options (same as before): binary point/dot vs. a 3D Gaussian heatmap with sigma
+  set in physical nm then converted per-axis for the 2/2/30 nm anisotropy. Recommend starting
+  with the Gaussian heatmap; treat as an ablation, not a fixed decision.
+
+**Inference (Phase B) uses real seeds.** Once a model is trained, running it on the full worm
+uses actual VAST `.vsanno` skeleton nodes as seeds, on the big hard-drive stack — this is where
+seed realism (do synthetic training seeds look like real click locations?) and coordinate
+alignment (§1, steps 6–7) actually need to be correct. Recommend, once both are available,
+sanity-checking a handful of real VAST seeds against the Phase A training stacks (if any overlap
+in region) purely to confirm training-time synthetic seeds are a reasonable stand-in for real
+clicks — not required to start training, but a good validation step before trusting Phase B
+inference.
 
 ## 4. Building training samples (patches)
 
-- **First measure, don't guess, patch size**: once §1 decodes real instance masks, compute the
-  bounding-box size distribution of actual neuron instances (in voxels and in physical nm,
-  respecting anisotropy) — this should directly drive patch size rather than picking one
-  arbitrarily.
-- Center each training patch on a (transformed, validated) seed coordinate, sized to comfortably
-  contain the full extent of the great majority of instances found in step above, with margin.
-- Augment seed position with small random jitter per training epoch (not exact-center every
-  time) so the model doesn't overfit to pixel-perfect seed placement — real usage will have
-  human-click imprecision at inference time.
-- **Only-partially-annotated regions**: do not assume "unlabeled voxel = true background."
-  Determine, per snippet, the sub-region that was *exhaustively* colored (all neurons present
-  were painted) vs. merely "colored so far" — training loss should probably be masked/ignored
-  outside the exhaustively-annotated region, otherwise the model is taught false negatives.
-  This needs a direct answer from the researcher (Open Question #5) since it isn't recoverable
-  from the files alone.
-- Consider a modest number of deliberate negative samples (seed placed just outside a neuron,
-  or in background) later, once the core positive-seed task works, to teach precise boundary
-  respect — not required for the v1 pipeline given the current task framing (seed is always
-  inside a neuron).
+- **Measure, don't guess, patch size**: once §1 decodes real instance masks from the available
+  stacks, compute the bounding-box size distribution of actual neuron instances (in voxels and
+  physical nm, respecting anisotropy) and use that to drive patch size.
+- Center each training patch on a synthetic seed point (§3), sized to comfortably contain the
+  full extent of most instances, with margin; jitter seed position per epoch as an augmentation.
+- **Only-partially-annotated regions**: don't assume unlabeled voxels are guaranteed background.
+  Determine, per stack, what region was *exhaustively* colored vs. merely "colored so far," and
+  mask/ignore loss outside the exhaustively-annotated region if that extent isn't the whole crop.
+  Needs a direct answer per stack (Open Questions).
+- Consider deliberate negative samples (seed just outside a neuron, or in background) later, once
+  the core positive-seed task works — not required for v1 given the current task framing.
 
 ## 5. Model input / output tensors
 
 - **Input**: 2-channel volume `[raw_EM_patch, seed_channel]`, shape `(2, Dz, Hy, Wx)`, raw
-  intensity normalized (e.g. per-dataset percentile normalization, since EM contrast can vary
-  between snippets/sessions).
-- **Output**: 1-channel binary mask, same spatial shape, sigmoid activation (probability that
-  voxel belongs to the seeded neuron).
-- Optional (not v1): an auxiliary distance-transform or boundary-map output channel as extra
-  supervision to help separate touching neurons — worth revisiting once touching-neuron
-  failures are actually observed empirically (§9), not designed in blind.
+  intensity normalized (per-stack, since EM contrast can vary between stacks/imaging sessions).
+- **Output**: 1-channel binary mask, same spatial shape, sigmoid activation.
+- Optional (not v1): an auxiliary distance-transform/boundary-map output to help separate
+  touching neurons — revisit once that failure mode is actually observed empirically.
 
 ## 6. 3D U-Net architecture
 
-- Standard encoder-decoder 3D U-Net with skip connections, but **anisotropy-aware**: given
-  2/2/30 nm voxels, early pooling/strides should be in-plane-only (e.g. stride `(1,2,2)`) before
-  any pooling touches z, and/or use anisotropic kernels (e.g. `(1,3,3)` mixed with `(3,3,3)`) —
-  this mirrors standard practice in anisotropic EM connectomics networks rather than treating
-  the volume as isotropic.
-- Prefer GroupNorm/InstanceNorm over BatchNorm given small batch sizes typical of 3D volumes
-  under memory constraints.
-- Start from an established, tested 3D U-Net implementation (e.g. MONAI's `UNet`, or an
-  nnU-Net-style anisotropic config) rather than writing the architecture from scratch — data
-  volume is currently small, so implementation risk should be minimized in favor of getting a
-  correct baseline running.
-- Given how little labeled data exists right now (one snippet, on the order of a few dozen
-  usable instances), plan explicitly for: heavy augmentation, a relatively shallow/small network
-  to limit overfitting, and considering self-supervised pretraining on unlabeled raw EM (once
-  available) or transfer from an existing permissively-licensed EM segmentation model.
+- Standard encoder-decoder 3D U-Net with skip connections, **anisotropy-aware**: given 2/2/30 nm
+  voxels, pool in-plane before pooling z (e.g. stride `(1,2,2)` early on), and/or use anisotropic
+  kernels (mixing `(1,3,3)` and `(3,3,3)`) — standard practice for anisotropic EM connectomics
+  data rather than treating the volume as isotropic.
+- Prefer GroupNorm/InstanceNorm over BatchNorm given small 3D batch sizes under memory limits.
+- Start from an established implementation (e.g. MONAI's `UNet`, or an nnU-Net-style anisotropic
+  config) rather than writing the architecture from scratch, given how little labeled data
+  currently exists.
+- Plan explicitly for: heavy augmentation, a relatively shallow/small network to limit
+  overfitting, and considering self-supervised pretraining on unlabeled raw EM (there will be
+  plenty of unlabeled raw EM even within just the Phase A PNG stacks, let alone the full hard
+  drive) or transfer from an existing permissively-licensed EM segmentation model.
 
 ## 7. Loss functions
 
-- Baseline: combined **Dice + BCE** — standard robust default for imbalanced binary volumetric
-  segmentation and a reasonable v1 choice.
-- Alternative to try if class imbalance or small-neuron performance is poor: **focal loss** or
-  **focal Tversky loss** (lets FP/FN be weighted differently — relevant because under-segmenting
-  a neuron and leaking into a neighboring one have different costs).
-- Boundary-aware loss (e.g. distance-weighted or explicit boundary term) as a later refinement
-  once touching-neuron leakage is observed as an actual failure mode, not designed preemptively.
+- Baseline: combined **Dice + BCE**.
+- Alternative if class imbalance or small-neuron performance is poor: **focal loss** or **focal
+  Tversky loss** (lets FP/FN be weighted differently — relevant since under-segmenting vs.
+  leaking into a neighboring neuron have different costs).
+- Boundary-aware loss as a later refinement once touching-neuron leakage is observed empirically.
 
 ## 8. Train/validation/test split (no leakage)
 
-- Split at the **instance (neuron) level**, not the patch level — the same neuron instance
-  (even via a different seed node or a jittered crop) must never appear in more than one split.
-- Ideally split at the **snippet/dataset level** once there are enough snippets (i.e., whole
-  datasets held out entirely), since that's the only way to test true generalization to new
-  tissue regions/imaging sessions.
-- With currently only one snippet: use grouped k-fold / leave-some-neurons-out cross-validation
-  within it for a first read on signal, but treat this explicitly as a **weak, interim**
-  estimate — real held-out generalization needs a second, independent snippet at minimum
-  (Open Question #8 — same worm or different worm matters here too).
+- Split at the **instance (neuron) level** first — the same neuron instance must never appear
+  (even via a different synthetic seed or jittered crop) in more than one split.
+- Split at the **stack level** once there are enough stacks (whole `Training Data/<Stack>/`
+  folders held out entirely) — the only way to test generalization to new tissue regions/imaging
+  sessions, and the natural unit now that data arrives one stack at a time.
+- With currently one stack: grouped k-fold / leave-some-neurons-out cross-validation within it
+  for a first read on signal, explicitly treated as a **weak, interim** estimate until a second
+  independent stack is available (see Open Questions — same worm or different worm matters here).
 
 ## 9. Evaluation metrics
 
 - Per-instance volumetric **Dice** and **IoU**.
 - Voxelwise and instance-level **precision/recall**.
-- **Boundary accuracy**: average symmetric surface distance or boundary-F1 between predicted
-  and ground-truth surfaces.
-- **Leakage metric** (specific to this task): fraction of predicted foreground voxels that fall
-  inside a *different* ground-truth instance than the seeded one — directly measures the
-  touching-neuron failure mode this architecture is most exposed to.
-- **Seed-sensitivity**: re-run inference with the seed perturbed by a few voxels and measure
-  output stability — a practical proxy for how robust the model will be to imprecise human
-  clicks at real inference time.
+- **Boundary accuracy**: average symmetric surface distance or boundary-F1.
+- **Leakage metric**: fraction of predicted foreground voxels landing inside a *different*
+  ground-truth instance than the seeded one — the touching-neuron failure mode this task is
+  most exposed to.
+- **Seed-sensitivity**: perturb the seed by a few voxels and measure output stability — a proxy
+  for robustness to imprecise real clicks at Phase B inference time.
 
 ## 10. Inference workflow
 
-- Given a raw volume region and one seed point: crop a patch around the seed at the same
-  physical scale used in training, run the model, and paste the (thresholded, e.g. 0.5 initially
-  then tuned on validation data) prediction back into the full-volume coordinate frame.
-- Because this is seed-conditioned rather than whole-volume segmentation, there's no
-  tile-and-stitch merging problem the way there would be for standard dense segmentation —
-  inference is inherently local per seed.
-- If a neuron has multiple VAST skeleton nodes along its length, running inference from each and
-  taking the union (or majority vote) is a natural way to get a more complete mask and a
-  built-in consistency check (do independent seeds on the same neuron agree?).
+Two distinct inference contexts now that Phase A/B are separated:
+
+- **Validation-style inference (within this repo's data)**: given a held-out stack and a
+  synthetic or real seed inside it, crop a patch, run the model, paste the thresholded
+  prediction back into that stack's coordinate frame. No tiling/stitching problem since this is
+  inherently local per seed, not whole-volume dense segmentation.
+- **Phase B — full-worm inference (on the hard drive)**: for each real VAST skeleton node, map
+  its coordinate into the trained model's expected frame (§1 step 7), crop a patch from the full
+  EM stack around it, run the model, and place the result into the full-worm output. If a neuron
+  has multiple skeleton nodes along its length, run inference from each and union/majority-vote
+  the results — also a built-in consistency check (do independent seeds on the same neuron
+  agree?). This phase runs wherever the hard drive is attached (the trained model weights travel
+  there; the raw stack does not travel here).
 
 ## 11. Risks / open issues
 
-- **Coordinate alignment between VAST and webKnossos** is the largest concrete risk — confirmed
-  today that this annotation download has no raw EM and no bounding-box/offset metadata file,
-  so pixel-aligned (image, seed, mask) triples do not yet exist and must be actively constructed.
-- **Ambiguous segment validity**: only a fraction of the 70 listed segment IDs are named/colored;
-  a hard rule for "real neuron label" vs. "WIP/noise" is needed before trusting any ID blindly.
+- **Alignment assumption needs verification, not just trust**: the PNG-stack/WKW-mask match in
+  §0.3 is strong circumstantial evidence (dimensions, offsets, slice count all line up) but has
+  not been pixel-verified yet — do this before building on top of it.
+- **Ambiguous segment validity**: most of the 70 listed segment IDs in `Juliet_Stack2` are
+  unnamed; need a rule for which count as real, trustworthy neuron labels.
 - **Partial annotation extent**: unlabeled ≠ guaranteed background unless the exhaustively-
-  colored region is explicitly known per snippet.
-- **Extreme anisotropy** (2/2/30 nm) affects patch shape, kernel choice, and augmentation
-  (rotations must respect true physical proportions, not treat the volume as isotropic).
-- **Very small dataset currently** (effectively one snippet) → high overfitting risk.
-- **Class imbalance** (neuron voxels vs. background within any given patch).
-- **Touching/adjacent neurons**: the model must learn to stop at the true instance boundary from
-  a single seed rather than bleeding into a neighbor — likely the hardest part of this task.
-- **Annotation noise**: hand-drawn boundaries have some inherent human inconsistency; expect
-  soft/noisy ground truth, not pixel-perfect truth.
-- **Memory/compute limits**: 3D patches at 2 nm in-plane resolution can get large fast; concrete
-  patch size needs to be checked against available GPU VRAM once that's known (Open Question
-  #6) — no GPU is currently set up in this workspace.
-- **WKW block-boundary effects**: data is stored in compressed 32³ voxel buckets; whatever
-  reader is used must correctly handle patches that straddle bucket boundaries.
-- **Data locality**: the full raw EM stack (many GB, on a USB drive) cannot be pushed to GitHub;
-  training will need to happen on/near that drive, or with a deliberately extracted, appropriately
-  small subset — plan the repo to hold code/config/manifests only, never raw EM or full-resolution
-  masks.
+  colored region is explicitly known per stack.
+- **Extreme anisotropy** (2/2/30 nm) affects patch shape, kernel choice, and augmentation.
+- **Small dataset currently** (effectively one stack) → high overfitting risk; mitigated somewhat
+  by synthetic multi-seed sampling per instance, but still a real constraint.
+- **Class imbalance** within any given patch (neuron voxels vs. background).
+- **Touching/adjacent neurons** — likely the hardest part of this task.
+- **Annotation noise**: hand-drawn boundaries have inherent human inconsistency.
+- **Memory/compute limits**: no GPU currently set up in this workspace; patch size needs to be
+  checked against whatever GPU/VRAM is actually available for training (Open Questions).
+- **WKW block-boundary effects**: data stored in compressed 32³ buckets; the decoder must handle
+  patches straddling bucket boundaries correctly.
+- **Repo size growth**: each stack folder is PNGs (tens of MB) + an annotation zip; fine for now
+  at one stack, but with several more coming this could approach GitHub's comfort limits —
+  worth watching, and moving to Git LFS if it becomes a problem, but not urgent yet.
+- **Phase B coordinate alignment** (VAST full-stack ↔ trained-model frame) is real but now
+  deferred — it blocks full-worm inference later, not training now.
 
 ## 12. Future human-in-the-loop extension
 
-- **v1**: train on the existing hand-colored-mask + VAST-seed pairs, as scoped above.
-- **v2 (active learning loop)**: run the trained model on new seeds → propose masks → a human
-  (in VAST or webKnossos) reviews and corrects them → each corrected (seed, mask) pair is added
-  back into the training set → periodic retraining/fine-tuning.
-- Prioritize which model proposals get reviewed first using the uncertainty signals already
-  defined in §9 (low confidence, high seed-sensitivity, or high predicted-leakage-into-neighbor
-  risk) so human correction time is spent where it improves the model most.
+- **v1**: train on Phase A stacks using synthetic seeds sampled from ground-truth masks, as
+  scoped above.
+- **v2 (active learning loop)**: run the trained model — either on held-out Phase A regions or,
+  once ready, on real VAST seeds in Phase B — to propose masks → a human (in VAST or webKnossos)
+  reviews/corrects them → each corrected (seed, mask) pair becomes a new training example (a new
+  `Training Data/<Stack>/`-style folder, or an addition to an existing one) → periodic
+  retraining/fine-tuning.
+- Prioritize which proposals get reviewed first using the uncertainty signals from §9 (low
+  confidence, high seed-sensitivity, high predicted leakage-into-neighbor risk) so human
+  correction time is spent where it improves the model most.
 
 ---
 
 ## Open questions to resolve before coding begins
 
-1. **Raw EM access**: how do I get the raw EM image data matching this webKnossos annotation
-   (same dataset/crop)? Via the `webknossos` Python client with your login against your
-   (apparently self-hosted, `localhost:9000`) instance, a "download with volume data" export
-   option, or do you already have that exact crop saved separately from an annotation-only
-   download?
-2. **VAST file access/schema**: can you share a sample of the actual `.vsanno` content (or a
-   VAST-exported text/CSV of the skeleton nodes) so I can confirm its coordinate convention,
-   units, and per-node neuron identity fields?
-3. **Same source stack?**: is the EM stack loaded into VAST literally the same raw stack/crop
-   that was uploaded to webKnossos as "Juliet_stack2," or a larger/different stack? If different,
-   what's known about the crop offset between them (even approximately)?
-4. **Segment validity rule**: of the 70 segment IDs in this annotation, which count as finished,
-   trustworthy neuron labels vs. WIP/scaffolding — is it "only named," "only colored," or
-   something else, or do you need to go back and clean this up in webKnossos first?
-5. **Annotation completeness extent**: what region of this snippet was *exhaustively* colored
-   (every neuron present painted) versus partially colored ("as far as I've gotten")? This
-   determines whether unlabeled voxels are safe to use as negative/background training signal.
-6. **Compute**: what GPU/VRAM do you have available for training, and will training happen on
-   the machine with the USB drive attached, or will a subset of data be copied elsewhere?
-7. **Typical neuron size**: once I can decode actual voxel data, I can measure this directly —
-   but if you already know roughly how large a Pristionchus neuron soma/process is in this
-   dataset (voxels or nm), that would help sanity-check patch size early.
-8. **Relationship between the 2–3 additional webKnossos datasets**: are they from the same
-   worm/individual (different regions of the same animal) or different individual worms? This
-   affects how train/val/test splitting should be grouped to avoid leakage (§8).
+1. **Data convention going forward**: will every future `Training Data/<Stack>/` folder always
+   contain both the raw EM PNG sequence *and* the annotation zip (as `Juliet_Stack2` does), so
+   training never needs direct webKnossos/API access to raw data? Worth confirming since it
+   simplifies the environment/tooling needed considerably.
+2. **Segment validity rule**: of the 70 segment IDs in `Juliet_Stack2`, which count as finished,
+   trustworthy neuron labels vs. WIP/scaffolding? Same question will apply to each new stack.
+3. **Annotation completeness extent, per stack**: what region of each stack was *exhaustively*
+   colored (every neuron present painted) vs. partially colored? Determines whether unlabeled
+   voxels are safe as negative/background training signal.
+4. **Relationship between stacks**: are `Juliet_Stack1/2/3` (and any others) from the same
+   individual worm (different regions) or different worms? Affects how train/val/test splitting
+   should be grouped to avoid leakage (§8).
+5. **Compute**: what GPU/VRAM is available for training? Training itself can happen anywhere
+   once `Training Data/` is populated (it no longer needs the hard drive) — but Phase B
+   full-worm inference will need to happen on/near the hard drive.
+6. **Typical neuron size**: once decoding is implemented I can measure this directly from the
+   masks, but a rough existing sense (voxels or nm) would help sanity-check patch size early.
+7. **Slice numbering**: is the `s0573`–`s0632` numbering in the PNG filenames a *global* slice
+   index into the full hard-drive stack (as it appears), and if so, is the x/y crop origin of
+   this 1024×1024 region within that full stack recorded anywhere? Not needed for training, but
+   needed later to map Phase A regions and Phase B predictions into the same frame.
+8. **VAST `.vsanno` schema**: for when Phase B planning starts in earnest — can you share a
+   sample of the actual file content/export so I can confirm its coordinate convention, units,
+   and per-node neuron identity fields?
 
-Setting up a local Python environment (`numpy`, `wkw`, `webknossos`, `torch`) is the natural
-next practical step to start answering #1, #4, #5, and #7 quantitatively — but is being held
-until you confirm you want to move past planning.
+Setting up a local Python environment (`numpy`, `wkw`, `Pillow`/`tifffile`, `torch`) is the
+natural next practical step to start answering #2, #3, #6, and to run the alignment-verification
+check in §11 — held until you confirm you want to move past planning.
