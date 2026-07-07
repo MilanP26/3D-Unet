@@ -11,6 +11,8 @@ See PLAN.md section 0 for how this layout was reverse-engineered and verified.
 from __future__ import annotations
 
 import hashlib
+import shutil
+import warnings
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
@@ -112,9 +114,13 @@ def _parse_nml(nml_path: Path) -> tuple[tuple[float, float, float], str, dict[in
 
 def _decode_wkw_labels(volume_zip_path: Path, extract_dir: Path, shape_xyz: tuple[int, int, int]) -> np.ndarray:
     data_volume_dir = extract_dir / "data_Volume"
-    if not data_volume_dir.exists():
-        with zipfile.ZipFile(volume_zip_path) as zf:
-            zf.extractall(data_volume_dir)
+    # Always extract fresh: this is only reached when the outer npz-level cache in
+    # load_stack() already decided a re-decode is needed (e.g. the annotation zip's
+    # content changed), so a stale leftover extraction here must not be reused.
+    if data_volume_dir.exists():
+        shutil.rmtree(data_volume_dir)
+    with zipfile.ZipFile(volume_zip_path) as zf:
+        zf.extractall(data_volume_dir)
 
     mag_dirs = [p for p in data_volume_dir.iterdir() if p.is_dir() and (p / "header.wkw").exists()]
     if not mag_dirs:
@@ -144,10 +150,15 @@ def load_stack(stack_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR, use_cache: 
     if len(zip_paths) != 1:
         raise ValueError(f"Expected exactly one annotation zip in {stack_dir}, found {len(zip_paths)}")
     annotation_zip = zip_paths[0]
+    # Hashing the (small) annotation zip's bytes -- not just its mtime -- catches the case
+    # where a placeholder/incomplete annotation gets replaced by a real one later with the
+    # same PNG count: the cache must not keep serving the old decoded mask in that case.
+    annotation_zip_hash = _hash_file(annotation_zip)
 
     if use_cache and cache_path.exists():
         with np.load(cache_path, allow_pickle=True) as npz:
-            if int(npz["png_count"]) == len(png_paths):
+            cached_zip_hash = str(npz["annotation_zip_hash"]) if "annotation_zip_hash" in npz else None
+            if int(npz["png_count"]) == len(png_paths) and cached_zip_hash == annotation_zip_hash:
                 segments = {
                     int(sid): SegmentMeta(*meta) for sid, meta in npz["segments"].item().items()
                 }
@@ -165,6 +176,11 @@ def load_stack(stack_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR, use_cache: 
     z, y, x = raw.shape
 
     extract_dir = cache_dir / "_extracted" / name
+    # Always start from a clean directory: if a previous (e.g. placeholder) annotation zip
+    # used a differently-named .nml than the one that replaces it, leftover files from the
+    # old extraction would otherwise sit alongside the new ones.
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir)
     extract_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(annotation_zip) as zf:
         zf.extractall(extract_dir)
@@ -190,6 +206,7 @@ def load_stack(stack_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR, use_cache: 
         ),
         raw_hash=raw_hash,
         png_count=len(png_paths),
+        annotation_zip_hash=annotation_zip_hash,
     )
 
     return Stack(
@@ -208,7 +225,23 @@ def load_all_stacks(
     cache_dir: Path = DEFAULT_CACHE_DIR,
     use_cache: bool = True,
 ) -> list[Stack]:
-    stacks = [load_stack(d, cache_dir, use_cache) for d in find_stack_dirs(training_data_dir)]
+    """Loads every stack folder found under training_data_dir. A folder that fails to
+    decode (malformed zip, corrupt PNG, wrong internal structure, etc.) is skipped with a
+    loud warning rather than aborting the whole run -- new data folders get dropped in
+    over time, sometimes as placeholders or mid-upload, and one bad one shouldn't block
+    training on everything else."""
+    stacks = []
+    for stack_dir in find_stack_dirs(training_data_dir):
+        try:
+            stacks.append(load_stack(stack_dir, cache_dir, use_cache))
+        except Exception as e:
+            warnings.warn(
+                f"Skipping stack {stack_dir.name!r}: failed to load ({type(e).__name__}: {e}). "
+                "This stack will be excluded from training until the problem is fixed.",
+                stacklevel=2,
+            )
+    if not stacks:
+        raise RuntimeError(f"No stack in {training_data_dir} could be loaded -- see warnings above.")
     group_stacks_by_raw_hash(stacks)
     return stacks
 

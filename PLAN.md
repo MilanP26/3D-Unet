@@ -378,6 +378,35 @@ under `.cache/seed_dist/`, so it only pays once ever, not once per run.
 you want to sanity-check changes quickly; do the real training run on the lab GPU machine with
 the defaults (or larger).**
 
+### Two more stacks arrived, plus automation/robustness hardening (2026-07-07, later)
+
+`Juliet_Stack1` (real, 53 slices, 25 instances) and `Helena_Stack1` arrived. Helena's PNGs
+are 2048×2048 (double Catherine's/Juliet's 1024×1024), and its annotation zip is a deliberate
+**placeholder** — internally it's literally a copy of `Catherine_stack1.nml` + Catherine's
+`data_Volume.zip`, standing in until the real Helena annotation is sent over. The plan is for
+the real one to replace it before the GPU training run.
+
+This was a good real-world test of whether "drop in a new stack, no code changes" actually
+holds, and it surfaced two robustness gaps that got fixed:
+
+- **Cache staleness on annotation swap**: the on-disk decode cache only checked PNG count
+  before, so replacing Helena's placeholder zip with the real one (same PNG count) would have
+  silently kept serving the *old* decoded mask. Fixed: the cache now also hashes the annotation
+  zip's actual bytes and invalidates on any change. The nested extraction directories are also
+  now wiped and re-extracted from scratch every time a re-decode happens, instead of trusting a
+  possibly-stale leftover extraction (this matters concretely here: the placeholder's internal
+  `.nml` is named `Catherine_stack1.nml`, and the real Helena annotation will almost certainly
+  use a different name — without this fix, the old file would have lingered and made the
+  "exactly one .nml" check fail confusingly).
+- **No fault isolation**: `load_all_stacks` previously aborted entirely if any single stack
+  failed to decode. Fixed: each stack now loads independently; a failure prints a clear warning
+  and excludes just that stack, so one bad/incomplete folder can't block training on the rest.
+
+Verified: all 5 current stacks (`Catherine_Stack1`, `Helena_Stack1`, `Juliet_Stack1`,
+`Juliet_Stack2`, `Juliet_Stack3`) decode cleanly and reproducibly through
+`scripts/inspect_data.py` with these fixes in place. **Discovery genuinely requires no code
+changes to add new stacks** — confirmed by `Juliet_Stack1` being picked up with zero edits.
+
 ### Running this on the lab GPU machine
 
 1. Copy the whole repo (or `git clone`/`git pull` it there) — `Training Data/` and the code are

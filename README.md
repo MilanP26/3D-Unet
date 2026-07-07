@@ -18,7 +18,16 @@ otherwise everything falls back to CPU.
 Each folder under `Training Data/<StackName>/` is one self-contained training example:
 a sequence of raw EM slice PNGs plus one webKnossos annotation `.zip` (mask). New stacks
 just need to be dropped in following that same convention -- the code discovers them
-automatically, no config changes needed.
+automatically at the start of every training run, no config or code changes needed. This
+also covers **replacing** an existing stack's annotation zip later (e.g. a placeholder
+swapped for the real thing): the decode cache is keyed on the annotation zip's actual
+content, not just its filename or PNG count, so a changed zip is automatically re-decoded
+rather than silently reusing the old cached mask.
+
+If a stack folder fails to decode (corrupt zip, unexpected internal structure, etc.), it's
+skipped with a clear warning printed at the top of the run rather than crashing training for
+every other stack -- worth actually reading that warning output once in a while, since a
+silently-skipped stack is not the same as "no stacks have problems."
 
 ## Inspecting data
 
