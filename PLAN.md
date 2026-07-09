@@ -91,7 +91,7 @@ workspace. Held as an action item, not done yet, per "don't implement yet."
 |---|---|---|---|---|
 | Cropped raw EM + colored mask pairs | webKnossos export | pushed into `Training Data/<Stack>/` in this repo | **Training (Phase A)** | 1 example (`Juliet_Stack2`) in; 2–3 more coming |
 | Full EM stack | VAST | USB hard drive | **Inference / skeletonizing whole worm (Phase B)** | not accessible from this machine |
-| Skeleton seed points (~206 nodes) | VAST, `.vsanno` | USB hard drive | **Phase B seeds**, and optionally later as a *validation* check on Phase A seed realism | not accessible from this machine |
+| Skeleton traces (~206 skeletons, one per neuron, each made of *many* nodes — see §3 update) | VAST, `.vsanno` | USB hard drive | **Phase B seeds**, and optionally later as a *validation* check on Phase A seed realism | not accessible from this machine |
 
 ---
 
@@ -116,7 +116,13 @@ For **Phase A (training data, this repo)**, once Python is set up:
 
 For **Phase B (full-stack inference)**, later, not needed to start training:
 6. Parse the VAST `.vsanno` file (on the USB drive) to get `(neuron_id, x, y, z)` skeleton nodes
-   in VAST's native voxel space.
+   in VAST's native voxel space. **Important, corrected understanding (see §3 for the full
+   design implication): this is not one node per neuron.** Each of the ~206 neurons has its own
+   skeleton made of *many* nodes (often hundreds) — one was placed on (roughly) every serial
+   slice while tracing that neuron through the stack, and a slice can have more than one node
+   for the same neuron if it splits into multiple profiles there or is large enough to need more
+   than one click to represent its cross-section. So parsing needs to preserve the grouping of
+   nodes by skeleton/neuron identity, not just flatten everything into a single seed-point list.
 7. Establish the mapping from VAST's full-stack coordinate space to whatever coordinate frame
    the trained model's inference script expects (crop origin, scale/mag) — this is where the
    VAST↔webKnossos alignment question that dominated the first plan pass actually matters, and
@@ -153,14 +159,28 @@ VAST↔webKnossos registration problem entirely for training:
   set in physical nm then converted per-axis for the 2/2/30 nm anisotropy. Recommend starting
   with the Gaussian heatmap; treat as an ablation, not a fixed decision.
 
-**Inference (Phase B) uses real seeds.** Once a model is trained, running it on the full worm
-uses actual VAST `.vsanno` skeleton nodes as seeds, on the big hard-drive stack — this is where
-seed realism (do synthetic training seeds look like real click locations?) and coordinate
-alignment (§1, steps 6–7) actually need to be correct. Recommend, once both are available,
-sanity-checking a handful of real VAST seeds against the Phase A training stacks (if any overlap
-in region) purely to confirm training-time synthetic seeds are a reasonable stand-in for real
-clicks — not required to start training, but a good validation step before trusting Phase B
-inference.
+**Inference (Phase B) uses real seeds — but "one seed per neuron" is the wrong mental model.**
+Each of the ~206 neurons has a skeleton made of many nodes (often hundreds), roughly one per
+serial slice along the neuron's length, sometimes several in one slice (branch point, or a
+cross-section too large for one click). This is actually a good match for how this model
+works, once the inference procedure accounts for it correctly:
+
+- Group `.vsanno` nodes by skeleton/neuron ID first. Each group is effectively a rough 3D
+  trace of that neuron through the stack, ordered along z.
+- **Don't run inference at every single node.** A training/inference patch already spans many
+  consecutive z-slices (e.g. a 32-voxel-deep patch covers ~32 slices at this dataset's 30nm z
+  spacing) — running inference at every node on a dense per-slice trace would be enormously
+  redundant (adjacent-slice patches overlap almost completely) for ~hundreds of nodes per
+  neuron x ~206 neurons. Instead, subsample each neuron's trace to a spaced-out set of seeds
+  (roughly every `patch_depth/2` slices along z, so consecutive inference windows still overlap
+  enough to stitch cleanly) before running the model.
+- Run inference at each subsampled seed, then **union all resulting local masks belonging to
+  the same neuron** into one combined mask spanning that neuron's full traced extent — this
+  naturally handles branch points and multi-node slices too (just more seeds feeding the same
+  union), no special-casing needed.
+- Seed realism and coordinate alignment (§1, steps 6-7) still matter as described below, but
+  the "one seed per neuron" framing anywhere else in this document (including §10) should be
+  read as "one seed per *sampled point along* a neuron's trace."
 
 ## 4. Building training samples (patches)
 
@@ -237,13 +257,15 @@ Two distinct inference contexts now that Phase A/B are separated:
   synthetic or real seed inside it, crop a patch, run the model, paste the thresholded
   prediction back into that stack's coordinate frame. No tiling/stitching problem since this is
   inherently local per seed, not whole-volume dense segmentation.
-- **Phase B — full-worm inference (on the hard drive)**: for each real VAST skeleton node, map
-  its coordinate into the trained model's expected frame (§1 step 7), crop a patch from the full
-  EM stack around it, run the model, and place the result into the full-worm output. If a neuron
-  has multiple skeleton nodes along its length, run inference from each and union/majority-vote
-  the results — also a built-in consistency check (do independent seeds on the same neuron
-  agree?). This phase runs wherever the hard drive is attached (the trained model weights travel
-  there; the raw stack does not travel here).
+- **Phase B — full-worm inference (on the hard drive)**: for each neuron's skeleton, subsample
+  its many nodes down to a spaced-out set of seeds (§3), map each into the trained model's
+  expected frame (§1 step 7), crop a patch from the full EM stack around it, run the model, and
+  union all of that neuron's local predictions into one full-length output mask. Running
+  multiple seeds per neuron also gives a free consistency check (do independent seeds along the
+  same neuron agree in their overlap regions?). This phase runs wherever the hard drive is
+  attached (the trained model weights travel there; the raw stack does not travel here). **This
+  entire phase is unimplemented as of 2026-07-07** — see §13 for what's built vs. not, and
+  [CLAUDE.md](CLAUDE.md) for the concrete next-steps checklist.
 
 ## 11. Risks / open issues
 
@@ -310,7 +332,13 @@ Two distinct inference contexts now that Phase A/B are separated:
    needed later to map Phase A regions and Phase B predictions into the same frame.
 8. **VAST `.vsanno` schema**: for when Phase B planning starts in earnest — can you share a
    sample of the actual file content/export so I can confirm its coordinate convention, units,
-   and per-node neuron identity fields?
+   and (now known to be essential, not optional) how nodes are grouped by skeleton/neuron
+   identity, given each neuron has many nodes rather than one?
+9. **Full hard-drive EM stack format**: folder of slice images (like `Training Data/`, just
+   much bigger), a single volume file, or a VAST-native format? Determines how Phase B's reader
+   needs to work.
+10. **VAST's import format for results**: what format does VAST accept to load a segmentation/
+    mask volume back in, so Phase B's output is actually usable rather than a guess?
 
 Setting up a local Python environment (`numpy`, `wkw`, `Pillow`/`tifffile`, `torch`) is the
 natural next practical step to start answering #2, #3, #6, and to run the alignment-verification
@@ -406,6 +434,21 @@ Verified: all 5 current stacks (`Catherine_Stack1`, `Helena_Stack1`, `Juliet_Sta
 `Juliet_Stack2`, `Juliet_Stack3`) decode cleanly and reproducibly through
 `scripts/inspect_data.py` with these fixes in place. **Discovery genuinely requires no code
 changes to add new stacks** — confirmed by `Juliet_Stack1` being picked up with zero edits.
+
+### Correction: VAST skeletons are dense per-slice traces, not one seed per neuron (2026-07-08)
+
+Sections 0, 1, 3, and 10 originally assumed roughly one seed point per neuron. That was wrong,
+corrected in place above: each of the ~206 neurons has its own skeleton made of *many* nodes
+(often hundreds) — one placed on (roughly) every serial slice while tracing the neuron through
+the stack, with more than one node in a slice where the neuron branches or is too large for a
+single click to represent. Phase B's design (§3, §10) was updated accordingly: group nodes by
+skeleton ID, subsample each neuron's trace to spaced-out seeds instead of running inference at
+every node, then union same-neuron predictions into one full-length mask.
+
+**Phase B (turning a trained model + the real hard-drive data into masks VAST can load back
+in) is still entirely unbuilt.** [CLAUDE.md](CLAUDE.md) is the concrete, checklist-style
+next-steps brief for picking this up on the GPU machine (or any future session) — read that
+first when resuming; it points back here for rationale.
 
 ### Running this on the lab GPU machine
 
