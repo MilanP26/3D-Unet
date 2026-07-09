@@ -54,6 +54,7 @@ Useful flags (see `py scripts/train.py --help` for all of them):
 | `--samples-per-instance N` | synthetic seed samples drawn per neuron per epoch |
 | `--batch-size N` | |
 | `--device cuda\|cpu` | default: auto-detect |
+| `--exclude-stacks NAME [NAME ...]` | skip these `Training Data/<Stack>` folders entirely (e.g. a stack still using a placeholder annotation) |
 
 **What you'll see:** a one-time "Precomputing seed distributions" progress bar (this cost
 depends only on how many neurons exist, not on patch size or model size -- it doesn't

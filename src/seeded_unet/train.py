@@ -40,11 +40,19 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default=None, help="cuda|cpu, default: auto-detect")
     p.add_argument("--no-cache", action="store_true", help="ignore/rebuild decoded stack cache")
+    p.add_argument(
+        "--exclude-stacks", type=str, nargs="*", default=[],
+        help="Training Data/<Stack> folder name(s) to skip entirely, e.g. a stack whose "
+        "annotation is still a known placeholder",
+    )
     return p.parse_args(argv)
 
 
 def build_dataloaders(args) -> tuple[DataLoader, DataLoader, list, list]:
-    stacks = load_all_stacks(args.training_data_dir, args.cache_dir, use_cache=not args.no_cache)
+    stacks = load_all_stacks(
+        args.training_data_dir, args.cache_dir, use_cache=not args.no_cache,
+        exclude_names=tuple(args.exclude_stacks),
+    )
     print(f"Loaded {len(stacks)} stack(s):")
     for s in stacks:
         n_ids = len(s.instance_ids(min_voxels=1))

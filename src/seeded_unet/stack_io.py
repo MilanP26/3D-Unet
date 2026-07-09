@@ -55,12 +55,16 @@ class Stack:
         return self.labels == instance_id
 
 
-def find_stack_dirs(training_data_dir: Path = DEFAULT_TRAINING_DATA_DIR) -> list[Path]:
+def find_stack_dirs(
+    training_data_dir: Path = DEFAULT_TRAINING_DATA_DIR,
+    exclude_names: tuple[str, ...] = (),
+) -> list[Path]:
     if not training_data_dir.exists():
         raise FileNotFoundError(f"No training data directory at {training_data_dir}")
     return sorted(
         p for p in training_data_dir.iterdir()
-        if p.is_dir() and list(p.glob("*.png")) and list(p.glob("*.zip"))
+        if p.is_dir() and p.name not in exclude_names
+        and list(p.glob("*.png")) and list(p.glob("*.zip"))
     )
 
 
@@ -224,14 +228,16 @@ def load_all_stacks(
     training_data_dir: Path = DEFAULT_TRAINING_DATA_DIR,
     cache_dir: Path = DEFAULT_CACHE_DIR,
     use_cache: bool = True,
+    exclude_names: tuple[str, ...] = (),
 ) -> list[Stack]:
     """Loads every stack folder found under training_data_dir. A folder that fails to
     decode (malformed zip, corrupt PNG, wrong internal structure, etc.) is skipped with a
     loud warning rather than aborting the whole run -- new data folders get dropped in
     over time, sometimes as placeholders or mid-upload, and one bad one shouldn't block
-    training on everything else."""
+    training on everything else. `exclude_names` skips folders by name outright (e.g. a
+    stack whose annotation is still a known placeholder)."""
     stacks = []
-    for stack_dir in find_stack_dirs(training_data_dir):
+    for stack_dir in find_stack_dirs(training_data_dir, exclude_names=exclude_names):
         try:
             stacks.append(load_stack(stack_dir, cache_dir, use_cache))
         except Exception as e:
