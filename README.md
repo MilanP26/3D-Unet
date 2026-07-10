@@ -85,6 +85,22 @@ There's also a one-time setup cost the first time seed distributions are compute
 for the current 3 stacks) -- this is cached to `.cache/seed_dist/` so it's paid once ever per
 machine, not once per run.
 
+**Checkpoint loading note**: newer PyTorch (2.6+) defaults `torch.load` to `weights_only=True`,
+which used to reject these checkpoints (they store a few `Path` objects in `args`). Fixed on
+both ends -- `train.py` now stores plain strings, and `infer.py`/`phase_b_infer.py` explicitly
+load with `weights_only=False` (safe: these are checkpoints this codebase produces itself, not
+third-party files) -- so this affects neither old nor new checkpoints going forward.
+
+## Plotting loss curves
+
+```
+py scripts/plot_training_log.py outputs/training_log.csv
+```
+
+Reads any `training_log.csv` written by `train.py` and saves `loss_curves.png` (train/val
+loss + val Dice/IoU) next to it. No GPU or training data needed -- just the CSV file, so
+this can be run anywhere, including a different machine than the one that trained.
+
 ## Inference (validation-style, within a Training Data stack)
 
 ```
@@ -92,8 +108,12 @@ py scripts/infer.py --checkpoint outputs/checkpoints/best.pt --stack-name Cather
 ```
 
 Crops a patch around the given seed voxel in that stack, runs the model, and saves the
-predicted binary mask patch to `outputs/inference_mask.npy`. This is for sanity-checking
-the model against known data.
+predicted binary mask patch to `outputs/inference_mask.npy` **and** a viewable PNG to
+`outputs/inference_visualization.png` (raw EM with the predicted mask overlaid across a few
+slices -- this, not the raw `.npy` array, is what to hand someone who asks "what did the
+model predict"). Pass `--visualization ''` to skip the image. This only needs the checkpoint
+file and this repo's `Training Data/` -- no GPU or hard drive required, so it runs fine on a
+laptop as long as the checkpoint has been copied over from wherever training happened.
 
 ## Phase B: inference on the full worm with real VAST seeds
 
@@ -111,9 +131,14 @@ For one skeleton (`--tree-id`, see `Data/VAST_skeleton_data.csv`), subsamples sp
 seeds along its traced length (default every 500nm, `--target-spacing-nm`), reads a real
 patch per seed straight from the full tiled stack, runs the trained model, and saves packed
 per-seed masks + placement to `outputs/phase_b/tree_<id>/predictions.npz`. `--max-seeds` caps
-how many seeds run, for a quick test instead of a full tree. **Not yet built**: merging a
-tree's per-seed predictions into one full-length mask, and a writer for whatever format VAST
-needs to import a segmentation back in (still unknown -- see CLAUDE.md).
+how many seeds run, for a quick test instead of a full tree. `--save-example-visualizations N`
+(default 3) also saves `example_node<id>.png` overlay images for a spread of seeds along the
+trace -- worth keeping on, since `predictions.npz` itself only stores packed masks, not the
+raw EM, and the raw EM is only readable while the hard drive is attached; without these PNGs
+saved during the run, producing a viewable image later would mean reading the hard drive
+again. **Not yet built**: merging a tree's per-seed predictions into one full-length mask, and
+a writer for whatever format VAST needs to import a segmentation back in (still unknown --
+see CLAUDE.md).
 
 ## Code layout
 
@@ -127,8 +152,10 @@ src/seeded_unet/
   losses.py         Dice + BCE loss, Dice/IoU metrics
   train.py          training CLI
   infer.py          seed -> mask inference CLI (Phase A, within a Training Data stack)
+  visualize.py      turns a (raw patch, predicted mask) pair into a viewable PNG overlay
   phase_b_stack.py  windowed reader for the full hard-drive EM stack (VAST's tiled format)
   vast_skeleton.py  parses Data/VAST_skeleton_data.csv, subsamples seeds along each trace
   phase_b_infer.py  Phase B inference CLI (real seeds, real full-stack patches)
-scripts/            thin entry points (`train.py`, `infer.py`, `inspect_data.py`, `phase_b_infer.py`)
+scripts/            thin entry points (`train.py`, `infer.py`, `inspect_data.py`,
+                    `phase_b_infer.py`, `plot_training_log.py`)
 ```

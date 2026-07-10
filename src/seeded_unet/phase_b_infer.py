@@ -27,6 +27,7 @@ from .infer import run_inference
 from .model import SeededUNet3D
 from .phase_b_stack import load_vsvi, read_region_centered
 from .vast_skeleton import DEFAULT_SKELETON_CSV, load_skeletons, subsample_seeds
+from .visualize import save_overlay_montage
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -42,6 +43,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--target-spacing-nm", type=float, default=500.0)
     p.add_argument("--max-seeds", type=int, default=None, help="cap seeds processed, for a quick test run")
     p.add_argument("--output-dir", type=Path, default=Path("outputs/phase_b"))
+    p.add_argument(
+        "--save-example-visualizations", type=int, default=3,
+        help="save a raw+mask overlay PNG for this many seeds (spread across the trace) while "
+        "the hard drive is attached, so there's something viewable without re-reading it later; 0 to disable",
+    )
     p.add_argument("--device", type=str, default=None)
     return p.parse_args(argv)
 
@@ -57,7 +63,10 @@ def main(argv=None):
         f"scale_nm(x,y,z)={cfg.scale_nm_xyz}"
     )
 
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    # weights_only=False: this is a checkpoint train.py produced itself, not a third-party
+    # file -- safe to unpickle fully. Needed for checkpoints saved before args were
+    # stringified (see train.py), and harmless for newer ones.
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     train_args = ckpt["args"]
     model = SeededUNet3D(base_channels=train_args["base_channels"]).to(device)
     model.load_state_dict(ckpt["model"])
@@ -79,9 +88,12 @@ def main(argv=None):
     out_dir = args.output_dir / f"tree_{args.tree_id}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    n_vis = min(args.save_example_visualizations, len(seeds))
+    vis_indices = set(np.linspace(0, len(seeds) - 1, n_vis).round().astype(int).tolist()) if n_vis > 0 else set()
+
     seed_local_ids, seed_xyz, patch_origins_zyx, packed_masks = [], [], [], []
     pz, py, px = patch_shape_zyx
-    for node in tqdm(seeds, desc=f"tree {args.tree_id} seeds", unit="seed"):
+    for i, node in enumerate(tqdm(seeds, desc=f"tree {args.tree_id} seeds", unit="seed")):
         center_zyx = (node.z, node.y, node.x)
         raw_patch = read_region_centered(cfg, center_zyx, patch_shape_zyx)
         patch_center_zyx = (pz // 2, py // 2, px // 2)
@@ -101,6 +113,10 @@ def main(argv=None):
         patch_origins_zyx.append([c - p // 2 for c, p in zip(center_zyx, patch_shape_zyx)])
         packed_masks.append(np.packbits(mask))
 
+        if i in vis_indices:
+            vis_path = out_dir / f"example_node{node.local_id}.png"
+            save_overlay_montage(raw_patch, mask, vis_path, seed_zyx=patch_center_zyx)
+
     np.savez_compressed(
         out_dir / "predictions.npz",
         tree_id=args.tree_id,
@@ -111,6 +127,8 @@ def main(argv=None):
         packed_masks=np.stack(packed_masks),
     )
     print(f"Saved {len(seeds)} patch predictions to {out_dir / 'predictions.npz'}")
+    if vis_indices:
+        print(f"Saved {len(vis_indices)} example overlay PNGs to {out_dir} (example_node*.png)")
 
 
 if __name__ == "__main__":

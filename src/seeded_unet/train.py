@@ -109,6 +109,11 @@ def main(argv=None):
     ckpt_dir.mkdir(exist_ok=True)
     log_path = args.output_dir / "training_log.csv"
 
+    # Path objects aren't safe globals under torch's weights_only=True default (2.6+),
+    # so checkpoints store plain strings instead -- infer.py/phase_b_infer.py only ever
+    # read primitive values (patch_size, base_channels, etc.) back out of this anyway.
+    checkpoint_args = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
+
     train_loader, val_loader, train_inst, val_inst = build_dataloaders(args)
 
     model = SeededUNet3D(base_channels=args.base_channels).to(device)
@@ -164,10 +169,10 @@ def main(argv=None):
             writer.writerow([epoch, train_loss, val_loss, val_dice, val_iou, round(dt, 1)])
             log_file.flush()
 
-            torch.save({"model": model.state_dict(), "args": vars(args), "epoch": epoch}, ckpt_dir / "last.pt")
+            torch.save({"model": model.state_dict(), "args": checkpoint_args, "epoch": epoch}, ckpt_dir / "last.pt")
             if val_dice > best_val_dice:
                 best_val_dice = val_dice
-                torch.save({"model": model.state_dict(), "args": vars(args), "epoch": epoch}, ckpt_dir / "best.pt")
+                torch.save({"model": model.state_dict(), "args": checkpoint_args, "epoch": epoch}, ckpt_dir / "best.pt")
 
     print(f"Done. Best val dice: {best_val_dice:.4f}. Checkpoints in {ckpt_dir}")
 
