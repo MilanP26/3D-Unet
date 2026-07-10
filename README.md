@@ -93,21 +93,42 @@ py scripts/infer.py --checkpoint outputs/checkpoints/best.pt --stack-name Cather
 
 Crops a patch around the given seed voxel in that stack, runs the model, and saves the
 predicted binary mask patch to `outputs/inference_mask.npy`. This is for sanity-checking
-the model against known data -- running against the full hard-drive EM stack with real VAST
-skeleton seeds (the eventual connectome-mapping use case) needs the coordinate-alignment
-work described in PLAN.md section 1 (Phase B), which is a separate, later step.
+the model against known data.
+
+## Phase B: inference on the full worm with real VAST seeds
+
+Requires the external hard drive attached (the full EM stack + `Data/VAST_skeleton_data.csv`
+are far too large/sensitive to live in this repo's `Training Data/`; see PLAN.md/CLAUDE.md
+for how this was reverse-engineered and verified). Real skeleton seeds already come with
+absolute coordinates in the full stack's own frame, so no coordinate-alignment step is
+needed -- see CLAUDE.md "Building Phase B" for the full story.
+
+```
+py scripts/phase_b_infer.py --checkpoint outputs/checkpoints/best.pt --tree-id 1 --vsvi "E:\ppa_b4v5s13\aligned_stack\volume.vsvi" --max-seeds 20
+```
+
+For one skeleton (`--tree-id`, see `Data/VAST_skeleton_data.csv`), subsamples spaced-out
+seeds along its traced length (default every 500nm, `--target-spacing-nm`), reads a real
+patch per seed straight from the full tiled stack, runs the trained model, and saves packed
+per-seed masks + placement to `outputs/phase_b/tree_<id>/predictions.npz`. `--max-seeds` caps
+how many seeds run, for a quick test instead of a full tree. **Not yet built**: merging a
+tree's per-seed predictions into one full-length mask, and a writer for whatever format VAST
+needs to import a segmentation back in (still unknown -- see CLAUDE.md).
 
 ## Code layout
 
 ```
 src/seeded_unet/
-  stack_io.py   discovers/decodes/caches Training Data/<Stack>/ folders; dedups stacks
-                that share identical raw EM so they never get split across train/val
-  seeds.py      synthetic seed-point sampling (interior-biased) + Gaussian heatmap channel
-  dataset.py    builds the per-neuron instance list, train/val split, patch sampling
-  model.py      anisotropy-aware 3D U-Net (in-plane pooling before z-pooling)
-  losses.py     Dice + BCE loss, Dice/IoU metrics
-  train.py      training CLI
-  infer.py      seed -> mask inference CLI
-scripts/        thin entry points (`train.py`, `infer.py`, `inspect_data.py`)
+  stack_io.py       discovers/decodes/caches Training Data/<Stack>/ folders; dedups stacks
+                    that share identical raw EM so they never get split across train/val
+  seeds.py          synthetic seed-point sampling (interior-biased) + Gaussian heatmap channel
+  dataset.py        builds the per-neuron instance list, train/val split, patch sampling
+  model.py          anisotropy-aware 3D U-Net (in-plane pooling before z-pooling)
+  losses.py         Dice + BCE loss, Dice/IoU metrics
+  train.py          training CLI
+  infer.py          seed -> mask inference CLI (Phase A, within a Training Data stack)
+  phase_b_stack.py  windowed reader for the full hard-drive EM stack (VAST's tiled format)
+  vast_skeleton.py  parses Data/VAST_skeleton_data.csv, subsamples seeds along each trace
+  phase_b_infer.py  Phase B inference CLI (real seeds, real full-stack patches)
+scripts/            thin entry points (`train.py`, `infer.py`, `inspect_data.py`, `phase_b_infer.py`)
 ```

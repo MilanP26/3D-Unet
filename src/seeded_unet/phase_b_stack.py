@@ -19,10 +19,22 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+# Adjacent seeds along a skeleton trace usually fall in the same or a
+# neighboring tile, so decoded tiles are cached rather than re-read from disk
+# every patch. 128 tiles * 16MB (4096x4096 uint8) ~= 2GB, comfortably within
+# RAM on the GPU training machine.
+_TILE_CACHE_SIZE = 128
+
+
+@lru_cache(maxsize=_TILE_CACHE_SIZE)
+def _load_tile_cached(tile_path: str) -> np.ndarray:
+    return np.asarray(Image.open(tile_path).convert("L"), dtype=np.uint8)
 
 
 @dataclass
@@ -74,13 +86,21 @@ def load_vsvi(vsvi_path: Path) -> VsviConfig:
 
 
 def _find_section_dir(cfg: VsviConfig, s: int) -> Path | None:
+    # cfg (a dataclass) isn't hashable, so cache on its (stable, string) source_dir
+    # instead of the whole config -- this glob is re-run for every seed in the same
+    # section otherwise, which is pure repeated filesystem overhead.
+    return _find_section_dir_cached(str(cfg.source_dir), s)
+
+
+@lru_cache(maxsize=None)
+def _find_section_dir_cached(source_dir: str, s: int) -> Path | None:
     # Folder name template is "%05d_%04d_Section *" -- both numeric prefixes
     # are the same section index s (just different zero-padding widths); the
     # "Section *" suffix is a literal wildcard in VAST's own template (the
     # human-readable section number embedded there is s+1, 3-digit, but
     # that offset isn't recorded anywhere -- glob it instead of computing it).
     pattern = f"{s:05d}_{s:04d}_Section *"
-    matches = list((cfg.source_dir / "mip0").glob(pattern))
+    matches = list((Path(source_dir) / "mip0").glob(pattern))
     if not matches:
         return None
     if len(matches) > 1:
@@ -88,6 +108,7 @@ def _find_section_dir(cfg: VsviConfig, s: int) -> Path | None:
     return matches[0]
 
 
+@lru_cache(maxsize=None)
 def _find_tile_path(section_dir: Path, s: int, r: int, c: int) -> Path | None:
     pattern = f"{s:04d}_Section *_tr{r}-tc{c}.png"
     matches = list(section_dir.glob(pattern))
@@ -146,7 +167,7 @@ def read_region(
                 if oy0 >= oy1 or ox0 >= ox1:
                     continue
 
-                tile = np.asarray(Image.open(tile_path).convert("L"), dtype=np.uint8)
+                tile = _load_tile_cached(str(tile_path))
                 out[
                     zi,
                     oy0 - y0:oy1 - y0,
@@ -157,3 +178,33 @@ def read_region(
                 ]
 
     return out
+
+
+def read_region_centered(
+    cfg: VsviConfig,
+    center_zyx: tuple[int, int, int],
+    patch_shape_zyx: tuple[int, int, int],
+) -> np.ndarray:
+    """Like `read_region`, but takes a center point and patch shape, clipping
+    to the volume bounds and zero-padding whatever falls outside -- mirrors
+    `dataset._crop_with_padding`'s semantics so Phase A/B patches behave the
+    same way at volume edges. Real seeds here are all well within bounds (see
+    PLAN.md), but this keeps behavior defined instead of raising."""
+    bounds = (cfg.size_z, cfg.size_y, cfg.size_x)
+    starts = [c - p // 2 for c, p in zip(center_zyx, patch_shape_zyx)]
+    ends = [s + p for s, p in zip(starts, patch_shape_zyx)]
+
+    pad_before = [max(0, -s) for s in starts]
+    pad_after = [max(0, e - b) for e, b in zip(ends, bounds)]
+    clipped_starts = [max(0, s) for s in starts]
+    clipped_ends = [min(b, e) for b, e in zip(bounds, ends)]
+
+    region = read_region(
+        cfg,
+        (clipped_starts[0], clipped_ends[0]),
+        (clipped_starts[1], clipped_ends[1]),
+        (clipped_starts[2], clipped_ends[2]),
+    )
+    if any(pad_before) or any(pad_after):
+        region = np.pad(region, list(zip(pad_before, pad_after)), mode="constant", constant_values=0)
+    return region

@@ -450,6 +450,84 @@ in) is still entirely unbuilt.** [CLAUDE.md](CLAUDE.md) is the concrete, checkli
 next-steps brief for picking this up on the GPU machine (or any future session) — read that
 first when resuming; it points back here for rationale.
 
+### Real training run completed on the GPU machine (2026-07-08)
+
+30 epochs, defaults (`32x256x256` patch, `base_channels=24`), `Helena_Stack1` excluded via
+the new `--exclude-stacks` flag since its annotation is still the Catherine placeholder (not
+replaced in time). ~400s/epoch on an RTX 3090. Best val dice **0.583** (epoch 30) — train
+loss and val dice were both still improving at the last epoch with no sign of plateauing, so
+this is a working first checkpoint, not a converged one; more epochs would likely help before
+trusting it for anything beyond a Phase B pipeline smoke test.
+
+### Phase B built and verified end-to-end on real data (2026-07-09)
+
+With the hard drive (`E:\ppa_b4v5s13\aligned_stack`, `E:\Milan_files\`) attached to the GPU
+machine, the two big unknowns CLAUDE.md flagged got resolved:
+
+- **Full EM stack format**: it's VAST's own tiled multi-resolution pyramid, not flat PNGs —
+  a `volume.vsvi` config (JSON-*like*, but with unescaped backslashes in its path templates,
+  so needs a lenient parse, not `json.loads` directly) plus
+  `mip0/<section-folder>/*_tr<row>-tc<col>.png` tiles, 4096x4096 each, 9 rows x 25 cols,
+  102400x36864x1060 voxels total, 2/2/30nm scale (same scale as `Training Data/`).
+  `MissingImagePolicy: black` in the vsvi confirms missing edge tiles (the tissue doesn't
+  fill the full rectangular grid) should read as zero, not error. `src/seeded_unet/
+  phase_b_stack.py` implements a windowed reader against this — verified byte-exact against
+  raw tiles directly (including a read straddling a tile boundary) without ever loading the
+  full volume into memory. Decoded tiles and glob lookups are LRU-cached, which cut real
+  per-seed inference time from ~12s to ~3.5s average (seeds along the same trace usually
+  revisit the same or a neighboring tile).
+- **`.vsanno` was not reverse-engineered in the end, and that turned out to be the right
+  call.** The raw binary (magic `VSA0`) has a header matching the stack's dimensions, a
+  table of standard structure tags (Axon, Dendrite, Cell Body, Spine, etc.), and a per-node
+  name table — enough to confirm the file really does contain hundreds of nodes per neuron,
+  but a brute-force scan for the actual (x,y,z) coordinate array turned up a candidate that
+  looked plausible (values in-range) but didn't hold up (z didn't move smoothly slice-to-
+  slice the way a real trace should) — i.e. guessing further risked silently wrong
+  coordinates. Asked the researcher instead: VAST can export skeleton/node data directly to
+  CSV, avoiding the binary format entirely. That export is checked in at
+  `Data/VAST_skeleton_data.csv` (209,892 rows, no header). Column semantics were verified
+  against the data itself, not assumed:
+  - col 0 tree/skeleton id (269 distinct), col 1 local node id (contiguous 0..N-1 per tree,
+    confirmed), cols 3/4/5 = x/y/z in the full stack's mip0 voxel frame (range
+    x:24682-68015, y:10506-23948, z:27-948 — a sub-region of the full 102400x36864x1060
+    volume, consistent with "a semi-random coordinate in the nerve ring" rather than the
+    whole worm), col 6 parent local id (-1 for the tree's root; for every other row, checked
+    to resolve to another real local id in the same tree with **zero exceptions** across all
+    209,892 rows), col 8 a branch-child local id (same verification, also zero exceptions),
+    col 16 a free-text annotator tag, non-empty on 273 rows (values like `risky_merge`,
+    `potential_merge`, `cell_body_and_nerve_ring_exit`, `merge_with_vnc` — exactly the
+    touching/merging-neuron failure mode this whole task is most exposed to (§11); not used
+    yet, but a natural confidence/priority signal for §12's active-learning loop later).
+    Columns 2, 7, 9-15, and the second string field have no confirmed meaning and aren't
+    used. `src/seeded_unet/vast_skeleton.py` implements this parser plus `subsample_seeds()`
+    (walks each tree from its root, iteratively — trees run up to ~8000 nodes deep, past
+    Python's default recursion limit — picking a seed every ~500nm of physical path
+    distance, always including leaves so neurite tips aren't missed).
+  - This also resolved the coordinate-alignment question in §1/§11/§10 a different way than
+    expected: real seeds already come with absolute mip0 coordinates in the same frame
+    `phase_b_stack.py` reads, so there's no crop-relative-frame translation to solve at all.
+    The researcher separately confirmed `aligned_stack` and the `Training Data/` crops are
+    the same underlying export (crops were made by picking a coordinate in VAST and exporting
+    a small `Training Data`-shaped region for webKnossos annotation, with webKnossos then
+    resetting that crop's origin to (0,0,0) — hence no shared origin to look up, by
+    construction, not by omission). An attempted independent check (template-matching a known
+    crop's pixels against `aligned_stack` at the corresponding slice) did not turn up a
+    confident match — worth another look someday, but not blocking, since Phase B doesn't
+    depend on that alignment either way.
+- `src/seeded_unet/phase_b_infer.py` (+ `scripts/phase_b_infer.py`) ties it together: given a
+  tree id, subsamples seeds, reads a real patch per seed from the real full stack, runs the
+  existing trained model (reuses `infer.run_inference` completely unchanged — the only new
+  code is *getting real patches and seeds in front of it*), and saves packed per-seed masks
+  plus placement to `outputs/phase_b/tree_<id>/predictions.npz`. Verified on tree 1: real,
+  non-degenerate predictions (~58-60% foreground fraction per patch, not 0% or 100%).
+- **Not built yet**: merging a tree's per-seed patch predictions into one full-length neuron
+  mask (§10's union/majority-vote step), and a writer for whatever format VAST needs to
+  import a segmentation back in — genuinely unknown still, needs the researcher to check
+  VAST's import options before this is worth guessing at. A full run across all 269 trees
+  (~51,000 subsampled seeds at current settings) is estimated at very roughly two days even
+  with tile caching — worth deciding scope deliberately rather than kicking that off blind,
+  especially since the underlying checkpoint (above) hadn't converged yet either.
+
 ### Running this on the lab GPU machine
 
 1. Copy the whole repo (or `git clone`/`git pull` it there) — `Training Data/` and the code are
