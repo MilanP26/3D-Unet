@@ -34,7 +34,20 @@ _TILE_CACHE_SIZE = 128
 
 @lru_cache(maxsize=_TILE_CACHE_SIZE)
 def _load_tile_cached(tile_path: str) -> np.ndarray:
-    return np.asarray(Image.open(tile_path).convert("L"), dtype=np.uint8)
+    # volume.vsvi declares SourceBytesPerPixel=1 (8-bit), but the tiles on disk are
+    # actually 16-bit (PIL mode "I", values up to 65535) -- confirmed 2026-07-10 by
+    # checking raw pixel histograms directly. `.convert("L")` on a 16-bit PIL image
+    # CLIPS instead of rescaling (anything above 255 clamps to white), which was
+    # silently turning real tissue into a near-solid-white patch with no texture --
+    # caught because model output on it looked like a blob shaped only by the seed
+    # heatmap, with nothing tying it to real EM structure. Downscale properly instead.
+    img = Image.open(tile_path)
+    arr = np.asarray(img)
+    if img.mode == "L":
+        return arr.astype(np.uint8)
+    if img.mode.startswith("I"):
+        return (arr.astype(np.uint32) >> 8).astype(np.uint8)
+    raise ValueError(f"Unexpected tile image mode {img.mode!r} for {tile_path}")
 
 
 @dataclass
