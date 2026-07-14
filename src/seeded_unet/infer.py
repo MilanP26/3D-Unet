@@ -37,8 +37,8 @@ def run_inference(
     inp = torch.from_numpy(np.stack([raw_patch, heatmap], axis=0)[None]).to(device)
     model.eval()
     with torch.no_grad():
-        logits = model(inp)
-        probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
+        mask_logits, _lsd_pred = model(inp)  # LSD output (if any) isn't needed for this mask-only path
+        probs = torch.sigmoid(mask_logits)[0, 0].cpu().numpy()
     return probs > threshold
 
 
@@ -67,7 +67,10 @@ def main(argv=None):
     # before args were stringified, and harmless for new ones.
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     train_args = ckpt["args"]
-    model = SeededUNet3D(base_channels=train_args["base_channels"]).to(device)
+    # predict_lsd must match what the checkpoint was actually trained with, or
+    # load_state_dict below will fail on a missing/unexpected lsd_head.
+    predict_lsd = not train_args.get("no_lsd", False)
+    model = SeededUNet3D(base_channels=train_args["base_channels"], predict_lsd=predict_lsd).to(device)
     model.load_state_dict(ckpt["model"])
 
     stack = load_stack(args.training_data_dir / args.stack_name, args.cache_dir)

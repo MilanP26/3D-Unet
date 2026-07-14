@@ -461,7 +461,9 @@ trusting it for anything beyond a Phase B pipeline smoke test.
 
 ### Phase B built and verified end-to-end on real data (2026-07-09)
 
-With the hard drive (`E:\ppa_b4v5s13\aligned_stack`, `E:\Milan_files\`) attached to the GPU
+With the hard drive (originally `E:\ppa_b4v5s13\aligned_stack`, `E:\Milan_files\`; moved to a new
+drive 2026-07-13, now `F:\ppa_b4v5s13\aligned_stack` / `F:\Milan_files\` -- same content, only the
+drive letter changed) attached to the GPU
 machine, the two big unknowns CLAUDE.md flagged got resolved:
 
 - **Full EM stack format**: it's VAST's own tiled multi-resolution pyramid, not flat PNGs —

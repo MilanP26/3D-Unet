@@ -26,6 +26,15 @@ class DiceBCELoss(nn.Module):
         return self.bce_weight * bce + (1 - self.bce_weight) * dice
 
 
+def lsd_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Plain MSE regression loss for the auxiliary LSD head (lsd.py). Both
+    tensors are already normalized to a comparable [-1, 1]-ish scale in
+    lsd.compute_lsd_target, so a raw MSE (no extra weighting per-channel) is
+    reasonable -- unlike the raw voxel-unit offsets/covariances, which would
+    have swamped a Dice+BCE-scale mask loss."""
+    return F.mse_loss(pred, target)
+
+
 @torch.no_grad()
 def dice_iou_metrics(logits: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> dict[str, float]:
     preds = (torch.sigmoid(logits) > threshold).float()

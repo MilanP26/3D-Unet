@@ -17,6 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from .lsd import compute_lsd_target
 from .seeds import gaussian_heatmap, physical_sigma_to_voxels, sample_from_distribution, seed_distribution
 from .stack_io import DEFAULT_CACHE_DIR, Stack
 
@@ -119,9 +120,24 @@ class SeededPatchDataset(Dataset):
         seed_sigma_nm: float = 150.0,
         samples_per_instance: int = 8,
         interior_bias: float = 2.0,
-        jitter_voxels_zyx: tuple[int, int, int] = (2, 16, 16),
+        # No z jitter: some neurons here move around a lot slice-to-slice, so
+        # jittering the seed in z risked landing it well off the actual traced
+        # centerline rather than just nudging it (unlike x/y, where a modest jitter
+        # is still a realistic stand-in for an imprecise click). x/y jitter was
+        # also tightened from 16 down to 8 -- some instances are quite small, and a
+        # 16-voxel jitter could push the seed close to or outside a small one
+        # entirely (see PLAN.md 2026-07-13).
+        jitter_voxels_zyx: tuple[int, int, int] = (0, 8, 8),
         rng_seed: int | None = None,
         seed_dist_cache_dir: Path | None = DEFAULT_CACHE_DIR / "seed_dist",
+        predict_lsd: bool = True,
+        # Deliberately much smaller than seed_sigma_nm (150nm, which represents click
+        # uncertainty and is fine to be broad) -- this needs to be a genuinely LOCAL
+        # neighborhood. At 150nm it converts to a 75-voxel sigma in x/y given this
+        # data's 2nm-per-voxel in-plane scale -- barely "local" at all (a third of a
+        # 256-voxel patch width) and expensive to compute (gaussian_filter cost scales
+        # with kernel radius, ~4*sigma by default). 60nm -> 30 voxels in x/y, 2 in z.
+        lsd_sigma_nm: float = 60.0,
     ):
         self.instances = instances
         self.patch_shape_zyx = patch_shape_zyx
@@ -132,6 +148,8 @@ class SeededPatchDataset(Dataset):
         self.rng = np.random.default_rng(rng_seed)
         self._seed_dist_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self.seed_dist_cache_dir = seed_dist_cache_dir
+        self.predict_lsd = predict_lsd
+        self.lsd_sigma_nm = lsd_sigma_nm
 
     def __len__(self) -> int:
         return len(self.instances) * self.samples_per_instance
@@ -200,4 +218,10 @@ class SeededPatchDataset(Dataset):
 
         input_tensor = torch.from_numpy(np.stack([raw_patch, heatmap], axis=0))
         target_tensor = torch.from_numpy(mask_patch[None])
-        return input_tensor, target_tensor
+        if not self.predict_lsd:
+            return input_tensor, target_tensor
+
+        lsd_sigma_voxel = physical_sigma_to_voxels(self.lsd_sigma_nm, stack.scale_nm)
+        lsd_target = compute_lsd_target(mask_patch, lsd_sigma_voxel)
+        lsd_target_tensor = torch.from_numpy(lsd_target)
+        return input_tensor, target_tensor, lsd_target_tensor

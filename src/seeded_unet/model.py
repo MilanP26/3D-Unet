@@ -10,6 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .lsd import LSD_CHANNELS
+
 # One entry per downsampling stage: (z_stride, y_stride, x_stride).
 # First stage is in-plane-only; deeper stages become isotropic in voxel space.
 DEFAULT_STRIDES = [(1, 2, 2), (2, 2, 2), (2, 2, 2)]
@@ -55,7 +57,14 @@ class Up(nn.Module):
 
 
 class SeededUNet3D(nn.Module):
-    """Input: (B, 2, Z, Y, X) = [raw_EM, seed_heatmap]. Output: (B, 1, Z, Y, X) logits."""
+    """Input: (B, 2, Z, Y, X) = [raw_EM, seed_heatmap].
+    Output: (mask_logits, lsd_pred) -- (B, 1, Z, Y, X) and (B, lsd_channels, Z, Y, X),
+    or (mask_logits, None) if predict_lsd=False.
+
+    The LSD head (2026-07-13, see lsd.py) shares the whole decoder with the mask
+    head and only diverges at the final 1x1 conv, matching the "MTLSD" (multitask)
+    architecture in Sheridan et al. 2023 -- the simplest of the paper's three
+    variants, since it needs no second network/auto-context cascade."""
 
     def __init__(
         self,
@@ -63,6 +72,8 @@ class SeededUNet3D(nn.Module):
         out_channels: int = 1,
         base_channels: int = 24,
         strides: list[tuple[int, int, int]] = None,
+        predict_lsd: bool = True,
+        lsd_channels: int = LSD_CHANNELS,
     ):
         super().__init__()
         strides = strides or DEFAULT_STRIDES
@@ -78,7 +89,9 @@ class SeededUNet3D(nn.Module):
                 for i in reversed(range(len(strides)))
             ]
         )
-        self.head = nn.Conv3d(chs[0], out_channels, kernel_size=1)
+        self.mask_head = nn.Conv3d(chs[0], out_channels, kernel_size=1)
+        self.predict_lsd = predict_lsd
+        self.lsd_head = nn.Conv3d(chs[0], lsd_channels, kernel_size=1) if predict_lsd else None
 
     def forward(self, x):
         skips = [self.stem(x)]
@@ -89,4 +102,6 @@ class SeededUNet3D(nn.Module):
         for up, skip in zip(self.ups, reversed(skips[:-1])):
             x = up(x, skip)
 
-        return self.head(x)
+        mask_logits = self.mask_head(x)
+        lsd_pred = self.lsd_head(x) if self.predict_lsd else None
+        return mask_logits, lsd_pred

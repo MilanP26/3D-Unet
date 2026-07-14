@@ -37,7 +37,7 @@ def main(argv=None):
     ax1.plot(epochs, train_loss, label="train_loss", marker="o", markersize=3)
     ax1.plot(epochs, val_loss, label="val_loss", marker="o", markersize=3)
     ax1.set_xlabel("epoch")
-    ax1.set_ylabel("loss (Dice+BCE)")
+    ax1.set_ylabel("loss (Dice+BCE, plus LSD term if enabled)")
     ax1.set_title("Loss")
     ax1.legend()
     ax1.grid(alpha=0.3)

@@ -37,7 +37,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--skeleton-csv", type=Path, default=DEFAULT_SKELETON_CSV)
     p.add_argument(
         "--vsvi", type=Path, required=True,
-        help=r"path to the full stack's volume.vsvi, e.g. E:\ppa_b4v5s13\aligned_stack\volume.vsvi "
+        help=r"path to the full stack's volume.vsvi, e.g. F:\ppa_b4v5s13\aligned_stack\volume.vsvi "
         "(requires the hard drive to be attached)",
     )
     p.add_argument("--target-spacing-nm", type=float, default=500.0)
@@ -68,7 +68,10 @@ def main(argv=None):
     # stringified (see train.py), and harmless for newer ones.
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     train_args = ckpt["args"]
-    model = SeededUNet3D(base_channels=train_args["base_channels"]).to(device)
+    # predict_lsd must match what the checkpoint was actually trained with, or
+    # load_state_dict below will fail on a missing/unexpected lsd_head.
+    predict_lsd = not train_args.get("no_lsd", False)
+    model = SeededUNet3D(base_channels=train_args["base_channels"], predict_lsd=predict_lsd).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     patch_shape_zyx = tuple(train_args["patch_size"])
@@ -115,7 +118,20 @@ def main(argv=None):
 
         if i in vis_indices:
             vis_path = out_dir / f"example_node{node.local_id}.png"
-            save_overlay_montage(raw_patch, mask, vis_path, seed_zyx=patch_center_zyx)
+            origin_zyx = patch_origins_zyx[-1]
+            # Every real traced node (not just the subsampled seeds) that happens to fall
+            # inside this patch, in patch-local coords -- lets the montage show the actual
+            # annotator trace, not just the one seed this patch was centered on.
+            node_markers_zyx = [
+                (local_z, local_y, local_x)
+                for n in nodes
+                if 0 <= (local_z := n.z - origin_zyx[0]) < pz
+                and 0 <= (local_y := n.y - origin_zyx[1]) < py
+                and 0 <= (local_x := n.x - origin_zyx[2]) < px
+            ]
+            save_overlay_montage(
+                raw_patch, mask, vis_path, seed_zyx=patch_center_zyx, node_markers_zyx=node_markers_zyx,
+            )
 
     np.savez_compressed(
         out_dir / "predictions.npz",

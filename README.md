@@ -55,6 +55,28 @@ Useful flags (see `py scripts/train.py --help` for all of them):
 | `--batch-size N` | |
 | `--device cuda\|cpu` | default: auto-detect |
 | `--exclude-stacks NAME [NAME ...]` | skip these `Training Data/<Stack>` folders entirely (e.g. a stack still using a placeholder annotation) |
+| `--jitter-voxels-zyx Z Y X` | random seed jitter per training sample (default `0 8 8` -- no z jitter, tighter x/y than the original 16; see PLAN.md 2026-07-13) |
+| `--no-lsd` | disable the auxiliary local-shape-descriptor head (on by default -- see `lsd.py`) |
+| `--lsd-weight W` | weight of the LSD loss term added to the Dice+BCE mask loss (default 1.0) |
+| `--lsd-sigma-nm N` | physical radius of the local neighborhood LSDs describe (default 60nm) |
+
+The auxiliary LSD head (`lsd.py`, based on [Sheridan et al. 2023](https://doi.org/10.1038/s41592-022-01711-z))
+predicts local shape statistics (size, center-of-mass offset, coordinate covariance) for the
+seeded instance alongside the mask, sharing the whole decoder and diverging only at the last
+layer. Added specifically so the model has to reason from surrounding context rather than just
+local per-voxel evidence -- the situation this is meant to help with is a real annotation gap
+(e.g. dust obscuring a neuron in one section, so no skeleton node could be placed there even
+though the neuron obviously continues): the paper's own framing is that this makes weak/missing
+local evidence less of a problem, since the network can no longer get away with looking at only
+a few center voxels. A checkpoint trained with the LSD head enabled is not loadable with
+`--no-lsd` or vice versa (the architecture itself differs) -- `train.py` stores which was used,
+and `infer.py`/`phase_b_infer.py` read that back automatically so this isn't something to track
+by hand.
+
+A stack can also be excluded permanently (without needing to remember `--exclude-stacks` every
+run) by dropping an empty `EXCLUDE_FROM_TRAINING` file into its `Training Data/<Stack>/` folder --
+`Juliet_Stack3` is excluded this way (its annotation pass is incomplete; see PLAN.md). Delete that
+file to include the stack again.
 
 **What you'll see:** a one-time "Precomputing seed distributions" progress bar (this cost
 depends only on how many neurons exist, not on patch size or model size -- it doesn't
@@ -124,7 +146,7 @@ absolute coordinates in the full stack's own frame, so no coordinate-alignment s
 needed -- see CLAUDE.md "Building Phase B" for the full story.
 
 ```
-py scripts/phase_b_infer.py --checkpoint outputs/checkpoints/best.pt --tree-id 1 --vsvi "E:\ppa_b4v5s13\aligned_stack\volume.vsvi" --max-seeds 20
+py scripts/phase_b_infer.py --checkpoint outputs/checkpoints/best.pt --tree-id 1 --vsvi "F:\ppa_b4v5s13\aligned_stack\volume.vsvi" --max-seeds 20
 ```
 
 For one skeleton (`--tree-id`, see `Data/VAST_skeleton_data.csv`), subsamples spaced-out
@@ -136,7 +158,10 @@ how many seeds run, for a quick test instead of a full tree. `--save-example-vis
 trace -- worth keeping on, since `predictions.npz` itself only stores packed masks, not the
 raw EM, and the raw EM is only readable while the hard drive is attached; without these PNGs
 saved during the run, producing a viewable image later would mean reading the hard drive
-again. **Not yet built**: merging a tree's per-seed predictions into one full-length mask, and
+again. Each overlay slice also gets a purple circle on any real traced skeleton node
+(not just the seed the patch was centered on -- that one's marked separately with a yellow
+x) that happens to fall on that slice, so you can check the prediction against the actual
+annotator trace at a glance. **Not yet built**: merging a tree's per-seed predictions into one full-length mask, and
 a writer for whatever format VAST needs to import a segmentation back in (still unknown --
 see CLAUDE.md).
 

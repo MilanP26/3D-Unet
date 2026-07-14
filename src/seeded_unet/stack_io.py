@@ -26,6 +26,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TRAINING_DATA_DIR = REPO_ROOT / "Training Data"
 DEFAULT_CACHE_DIR = REPO_ROOT / ".cache"
 
+# Drop this (empty, contents don't matter) into a `Training Data/<Stack>/` folder to
+# have it skipped automatically on every run -- e.g. a stack with a known-incomplete
+# annotation pass, so its many not-yet-labeled real neurons don't get trained on as
+# false background. A persistent, per-folder alternative to passing --exclude-stacks
+# by hand every time; both mechanisms compose fine (this one just shrinks what
+# find_stack_dirs returns in the first place).
+EXCLUDE_MARKER_FILENAME = "EXCLUDE_FROM_TRAINING"
+
 
 @dataclass
 class SegmentMeta:
@@ -61,11 +69,21 @@ def find_stack_dirs(
 ) -> list[Path]:
     if not training_data_dir.exists():
         raise FileNotFoundError(f"No training data directory at {training_data_dir}")
-    return sorted(
-        p for p in training_data_dir.iterdir()
-        if p.is_dir() and p.name not in exclude_names
-        and list(p.glob("*.png")) and list(p.glob("*.zip"))
-    )
+    found = []
+    for p in sorted(training_data_dir.iterdir()):
+        if not (p.is_dir() and list(p.glob("*.png")) and list(p.glob("*.zip"))):
+            continue
+        if p.name in exclude_names:
+            continue
+        if (p / EXCLUDE_MARKER_FILENAME).exists():
+            warnings.warn(
+                f"Skipping stack {p.name!r}: found a {EXCLUDE_MARKER_FILENAME} marker file in "
+                "its folder. Delete that file to include it again.",
+                stacklevel=2,
+            )
+            continue
+        found.append(p)
+    return found
 
 
 def _hash_file(path: Path) -> str:
@@ -158,11 +176,21 @@ def load_stack(stack_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR, use_cache: 
     # where a placeholder/incomplete annotation gets replaced by a real one later with the
     # same PNG count: the cache must not keep serving the old decoded mask in that case.
     annotation_zip_hash = _hash_file(annotation_zip)
+    # Mirrors that same concern on the raw-EM side: a stack's PNGs can be replaced (e.g. the
+    # wrong slices were uploaded, then corrected) while keeping the same slice *count* and the
+    # *same* annotation zip -- png_count alone would miss that entirely. Cheap (3 file hashes),
+    # so there's no reason not to check it every time, not just when something looks off.
+    raw_hash = _hash_raw_volume(png_paths)
 
     if use_cache and cache_path.exists():
         with np.load(cache_path, allow_pickle=True) as npz:
             cached_zip_hash = str(npz["annotation_zip_hash"]) if "annotation_zip_hash" in npz else None
-            if int(npz["png_count"]) == len(png_paths) and cached_zip_hash == annotation_zip_hash:
+            cached_raw_hash = str(npz["raw_hash"]) if "raw_hash" in npz else None
+            if (
+                int(npz["png_count"]) == len(png_paths)
+                and cached_zip_hash == annotation_zip_hash
+                and cached_raw_hash == raw_hash
+            ):
                 segments = {
                     int(sid): SegmentMeta(*meta) for sid, meta in npz["segments"].item().items()
                 }
@@ -195,8 +223,6 @@ def load_stack(stack_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR, use_cache: 
     volume_zip_path = extract_dir / volume_zip_name
 
     labels = _decode_wkw_labels(volume_zip_path, extract_dir, shape_xyz=(x, y, z))
-
-    raw_hash = _hash_raw_volume(png_paths)
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
