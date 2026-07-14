@@ -1,7 +1,0 @@
-Excluded 2026-07-13: this annotation pass only has 20 segments labeled (vs. 69 in
-Juliet_Stack2, which shares the same raw EM crop -- see PLAN.md). Many real neurons
-in this crop are unlabeled here, and the training code currently has no way to
-tell "not yet annotated" apart from "genuinely background" (PLAN.md section 4's
-open question), so training on this stack's patches was likely teaching the model
-that real, unlabeled neurons are background. Delete this file to include it again
-once that partial-annotation handling is built, or once this pass is completed.
