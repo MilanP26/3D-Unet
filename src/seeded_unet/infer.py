@@ -28,6 +28,7 @@ def run_inference(
     seed_sigma_nm: float,
     device: torch.device,
     threshold: float = 0.5,
+    return_probs: bool = False,
 ) -> np.ndarray:
     raw_patch = _crop_with_padding(raw, seed_zyx, patch_shape_zyx).astype(np.float32) / 255.0
     center_in_patch = tuple(p // 2 for p in patch_shape_zyx)
@@ -39,7 +40,7 @@ def run_inference(
     with torch.no_grad():
         mask_logits, _lsd_pred = model(inp)  # LSD output (if any) isn't needed for this mask-only path
         probs = torch.sigmoid(mask_logits)[0, 0].cpu().numpy()
-    return probs > threshold
+    return probs if return_probs else probs > threshold
 
 
 def parse_args(argv=None):

@@ -4,3 +4,4 @@ pillow
 wkw
 torch
 tqdm
+mwatershed
