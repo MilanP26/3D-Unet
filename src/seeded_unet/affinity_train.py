@@ -48,6 +48,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--bce-weight", type=float, default=0.5)
     p.add_argument("--no-lsd", action="store_true", help="disable the auxiliary LSD head; on by default")
     p.add_argument("--lsd-weight", type=float, default=1.0)
+    p.add_argument(
+        "--no-augment", action="store_true",
+        help="disable training-time augmentation (rotation/flip/translation/artifacts/"
+        "misalignment -- see augmentations.py); on by default, per Sheridan et al. 2023",
+    )
     p.add_argument("--lsd-sigma-nm", type=float, default=60.0)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--seed", type=int, default=0)
@@ -84,11 +89,13 @@ def build_dataloaders(args) -> tuple[DataLoader, DataLoader]:
         train_stacks, patch_shape_zyx=tuple(args.patch_size), samples_per_stack=args.samples_per_stack,
         min_labeled_fraction=args.min_labeled_fraction, rng_seed=args.seed,
         predict_lsd=not args.no_lsd, lsd_sigma_nm=args.lsd_sigma_nm,
+        augment=not args.no_augment,
     )
     val_ds = DenseAffinityPatchDataset(
         val_stacks, patch_shape_zyx=tuple(args.patch_size), samples_per_stack=args.val_samples_per_stack,
         min_labeled_fraction=args.min_labeled_fraction, rng_seed=args.seed + 1,
         predict_lsd=not args.no_lsd, lsd_sigma_nm=args.lsd_sigma_nm,
+        augment=False,  # val should measure clean, unaugmented accuracy for a stable metric
     )
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)

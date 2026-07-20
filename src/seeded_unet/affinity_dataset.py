@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .affinity_targets import DEFAULT_OFFSETS, compute_affinities, compute_lsd_target_dense
+from .augmentations import random_artifact, random_flip, random_misalignment, random_rotate90, random_translate_crop
 from .dataset import Instance, _crop_with_padding
 from .seeds import physical_sigma_to_voxels
 from .stack_io import Stack
@@ -41,6 +42,8 @@ class DenseAffinityPatchDataset(Dataset):
         rng_seed: int | None = None,
         predict_lsd: bool = True,
         lsd_sigma_nm: float = 60.0,
+        augment: bool = True,
+        translate_pad_yx: int = 16,
     ):
         self.stacks = stacks
         self.patch_shape_zyx = patch_shape_zyx
@@ -51,6 +54,8 @@ class DenseAffinityPatchDataset(Dataset):
         self.rng = np.random.default_rng(rng_seed)
         self.predict_lsd = predict_lsd
         self.lsd_sigma_nm = lsd_sigma_nm
+        self.augment = augment
+        self.translate_pad_yx = translate_pad_yx
         self._bbox_cache: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {}
 
     def __len__(self) -> int:
@@ -74,15 +79,33 @@ class DenseAffinityPatchDataset(Dataset):
 
     def __getitem__(self, idx: int):
         stack = self.stacks[idx // self.samples_per_stack]
+        pad = self.translate_pad_yx if self.augment else 0
+        pz, py, px = self.patch_shape_zyx
+        padded_shape = (pz, py + 2 * pad, px + 2 * pad)
 
-        label_patch = None
+        label_padded = None
         for attempt in range(self.max_resample_attempts):
             center = self._random_center(stack)
-            candidate = _crop_with_padding(stack.labels, center, self.patch_shape_zyx)
+            candidate = _crop_with_padding(stack.labels, center, padded_shape)
             if (candidate != 0).mean() >= self.min_labeled_fraction or attempt == self.max_resample_attempts - 1:
-                label_patch = candidate
+                label_padded = candidate
                 break
-        raw_patch = _crop_with_padding(stack.raw, center, self.patch_shape_zyx).astype(np.float32) / 255.0
+        raw_padded = _crop_with_padding(stack.raw, center, padded_shape)
+
+        if self.augment:
+            # Artifacts/misalignment operate on raw only (label is the "true" 3D structure,
+            # unaffected by an imaging defect in one section -- see augmentations.py), and
+            # must happen before the translate sub-crop so a hit slice isn't ever guaranteed
+            # to land exactly at the crop's own edge.
+            raw_padded = random_artifact(raw_padded, self.rng)
+            raw_padded = random_misalignment(raw_padded, self.rng)
+            raw_patch, label_patch = random_translate_crop(raw_padded, label_padded, self.patch_shape_zyx, self.rng)
+            raw_patch, label_patch = random_flip(raw_patch, label_patch, self.rng)
+            raw_patch, label_patch = random_rotate90(raw_patch, label_patch, self.rng)
+        else:
+            raw_patch, label_patch = raw_padded, label_padded
+
+        raw_patch = raw_patch.astype(np.float32) / 255.0
 
         affinities = compute_affinities(label_patch, self.offsets)
         input_tensor = torch.from_numpy(raw_patch[None])

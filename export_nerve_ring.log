@@ -1,0 +1,4 @@
+device: cuda
+processing largest region: bbox x[41610:51257] y[12689:15712] (9647x3023), z=[488,520)
+checkpoint epoch 29
+~80 tiles expected

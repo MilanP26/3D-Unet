@@ -1,7 +1,9 @@
 """Discovery, decoding, and caching of Training Data/<Stack>/ folders.
 
 Each stack folder is expected to contain:
-  - a sequence of raw EM slice PNGs (grayscale, one file per z slice)
+  - a sequence of raw EM slices, one grayscale image file per z slice -- PNG or
+    TIFF, whichever the stack was exported as (see RAW_IMAGE_EXTENSIONS; a
+    given stack uses one format consistently, not a mix of both)
   - exactly one .zip file: a webKnossos volume-annotation export, which itself
     contains a `<name>.nml` (metadata: scale, segment list) and a nested
     `data_Volume.zip` (the WKW-format instance label volume).
@@ -33,6 +35,20 @@ DEFAULT_CACHE_DIR = REPO_ROOT / ".cache"
 # by hand every time; both mechanisms compose fine (this one just shrinks what
 # find_stack_dirs returns in the first place).
 EXCLUDE_MARKER_FILENAME = "EXCLUDE_FROM_TRAINING"
+
+# Checked in this order for each stack folder -- whichever is found first is used for
+# every slice in that stack. TIFF support added 2026-07-15 (Elle_Stack1 was exported as
+# TIFF instead of PNG); PIL reads both the same way once opened, so nothing downstream
+# needs to know which format a given stack came from.
+RAW_IMAGE_EXTENSIONS = (".png", ".tif", ".tiff")
+
+
+def _find_raw_image_paths(stack_dir: Path) -> list[Path]:
+    for ext in RAW_IMAGE_EXTENSIONS:
+        paths = sorted(stack_dir.glob(f"*{ext}"))
+        if paths:
+            return paths
+    return []
 
 
 @dataclass
@@ -71,7 +87,7 @@ def find_stack_dirs(
         raise FileNotFoundError(f"No training data directory at {training_data_dir}")
     found = []
     for p in sorted(training_data_dir.iterdir()):
-        if not (p.is_dir() and list(p.glob("*.png")) and list(p.glob("*.zip"))):
+        if not (p.is_dir() and _find_raw_image_paths(p) and list(p.glob("*.zip"))):
             continue
         if p.name in exclude_names:
             continue
@@ -94,14 +110,14 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _hash_raw_volume(png_paths: list[Path]) -> str:
+def _hash_raw_volume(raw_paths: list[Path]) -> str:
     """Cheap-but-safe identity hash: full bytes of first, middle, last slice
     plus the count. Two stacks sharing a raw EM crop (as Juliet_Stack2 and
     Juliet_Stack3 do) will collide here; two different crops essentially never
     will."""
     h = hashlib.sha256()
-    h.update(str(len(png_paths)).encode())
-    for p in (png_paths[0], png_paths[len(png_paths) // 2], png_paths[-1]):
+    h.update(str(len(raw_paths)).encode())
+    for p in (raw_paths[0], raw_paths[len(raw_paths) // 2], raw_paths[-1]):
         h.update(_hash_file(p).encode())
     return h.hexdigest()
 
@@ -155,11 +171,11 @@ def _decode_wkw_labels(volume_zip_path: Path, extract_dir: Path, shape_xyz: tupl
     return np.transpose(arr, (2, 1, 0))  # -> (Z, Y, X)
 
 
-def _load_raw_png_stack(png_paths: list[Path]) -> np.ndarray:
-    slices = [np.asarray(Image.open(p).convert("L"), dtype=np.uint8) for p in png_paths]
+def _load_raw_image_stack(raw_paths: list[Path]) -> np.ndarray:
+    slices = [np.asarray(Image.open(p).convert("L"), dtype=np.uint8) for p in raw_paths]
     shapes = {s.shape for s in slices}
     if len(shapes) != 1:
-        raise ValueError(f"Inconsistent PNG slice shapes in stack: {shapes}")
+        raise ValueError(f"Inconsistent raw slice shapes in stack: {shapes}")
     return np.stack(slices, axis=0)  # (Z, Y, X)
 
 
@@ -167,27 +183,27 @@ def load_stack(stack_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR, use_cache: 
     name = stack_dir.name
     cache_path = cache_dir / f"{name}.npz"
 
-    png_paths = sorted(stack_dir.glob("*.png"))
+    raw_paths = _find_raw_image_paths(stack_dir)
     zip_paths = list(stack_dir.glob("*.zip"))
     if len(zip_paths) != 1:
         raise ValueError(f"Expected exactly one annotation zip in {stack_dir}, found {len(zip_paths)}")
     annotation_zip = zip_paths[0]
     # Hashing the (small) annotation zip's bytes -- not just its mtime -- catches the case
     # where a placeholder/incomplete annotation gets replaced by a real one later with the
-    # same PNG count: the cache must not keep serving the old decoded mask in that case.
+    # same slice count: the cache must not keep serving the old decoded mask in that case.
     annotation_zip_hash = _hash_file(annotation_zip)
-    # Mirrors that same concern on the raw-EM side: a stack's PNGs can be replaced (e.g. the
-    # wrong slices were uploaded, then corrected) while keeping the same slice *count* and the
-    # *same* annotation zip -- png_count alone would miss that entirely. Cheap (3 file hashes),
+    # Mirrors that same concern on the raw-EM side: a stack's raw slices can be replaced (e.g.
+    # the wrong slices were uploaded, then corrected) while keeping the same slice *count* and
+    # the *same* annotation zip -- count alone would miss that entirely. Cheap (3 file hashes),
     # so there's no reason not to check it every time, not just when something looks off.
-    raw_hash = _hash_raw_volume(png_paths)
+    raw_hash = _hash_raw_volume(raw_paths)
 
     if use_cache and cache_path.exists():
         with np.load(cache_path, allow_pickle=True) as npz:
             cached_zip_hash = str(npz["annotation_zip_hash"]) if "annotation_zip_hash" in npz else None
             cached_raw_hash = str(npz["raw_hash"]) if "raw_hash" in npz else None
             if (
-                int(npz["png_count"]) == len(png_paths)
+                int(npz["png_count"]) == len(raw_paths)
                 and cached_zip_hash == annotation_zip_hash
                 and cached_raw_hash == raw_hash
             ):
@@ -204,7 +220,7 @@ def load_stack(stack_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR, use_cache: 
                     raw_hash=str(npz["raw_hash"]),
                 )
 
-    raw = _load_raw_png_stack(png_paths)
+    raw = _load_raw_image_stack(raw_paths)
     z, y, x = raw.shape
 
     extract_dir = cache_dir / "_extracted" / name
@@ -235,7 +251,7 @@ def load_stack(stack_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR, use_cache: 
             dtype=object,
         ),
         raw_hash=raw_hash,
-        png_count=len(png_paths),
+        png_count=len(raw_paths),
         annotation_zip_hash=annotation_zip_hash,
     )
 
