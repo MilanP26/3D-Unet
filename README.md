@@ -1,186 +1,150 @@
-# 3D-Unet
+# Whole-Worm Neuron Segmentation from Serial-Section EM
 
-Seeded (prompt-conditioned) 3D U-Net for segmenting individual *Pristionchus pacificus*
-neurons from EM volumes, given a point placed inside the neuron. See [PLAN.md](PLAN.md) for
-the full design rationale, data findings, and open questions.
+**Dense, per-neuron instance segmentation of a *Pristionchus pacificus* nervous system from
+serial-section electron microscopy — a 3D U-Net predicting voxel affinities, resolved into
+individual neurons by seeded mutex watershed using complete manual VAST skeletons as markers.**
 
-## Setup
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-3D%20U--Net-EE4C2C?logo=pytorch&logoColor=white)
+![Domain](https://img.shields.io/badge/domain-connectomics%20%2F%20EM-2b7a78)
+![Status](https://img.shields.io/badge/status-active%20research-informational)
 
-```
-py -m pip install -r requirements.txt
-```
+![Nerve-ring segmentation result](assets/nervering_segmentation.jpg)
 
-Python 3.11 was used for development. GPU (CUDA) is auto-detected and used if available;
-otherwise everything falls back to CPU.
+> **Left:** raw EM of the nerve ring (the densest, connectome-critical region). **Right:** the
+> v3 model's output — 28 tightly packed neurons on a single section, each assigned a distinct
+> identity with **zero structural overlap** between neurons.
 
-## Data layout
+---
 
-Each folder under `Training Data/<StackName>/` is one self-contained training example:
-a sequence of raw EM slice PNGs plus one webKnossos annotation `.zip` (mask). New stacks
-just need to be dropped in following that same convention -- the code discovers them
-automatically at the start of every training run, no config or code changes needed. This
-also covers **replacing** an existing stack's annotation zip later (e.g. a placeholder
-swapped for the real thing): the decode cache is keyed on the annotation zip's actual
-content, not just its filename or PNG count, so a changed zip is automatically re-decoded
-rather than silently reusing the old cached mask.
+## Overview
 
-If a stack folder fails to decode (corrupt zip, unexpected internal structure, etc.), it's
-skipped with a clear warning printed at the top of the run rather than crashing training for
-every other stack -- worth actually reading that warning output once in a while, since a
-silently-skipped stack is not the same as "no stacks have problems."
+Reconstructing a connectome means tracing *every* neuron through a stack of electron-microscopy
+sections and knowing, at each voxel, which neuron it belongs to. Doing this by hand is a
+months-long effort per animal. This project automates the per-neuron labeling step for a
+*Pristionchus pacificus* (nematode) volume, using the researcher's own manually traced skeletons
+as anchors so that every predicted mask maps to a known, biologically real neuron.
 
-## Inspecting data
+The full target volume is **102,400 × 36,864 × 1,060 voxels** (2 × 2 × 30 nm) — far too large to
+hold in memory — seeded by **208 complete neuron skeletons** (213,283 traced nodes) exported from
+[VAST](https://lichtman.rc.fas.harvard.edu/vast/).
 
-```
-py scripts/inspect_data.py
-```
+## Why affinities + seeded watershed
 
-Decodes every stack, cross-checks decoded labels against webKnossos's own recorded
-segment anchor points (a correctness check on the WKW decode + PNG/mask alignment), and
-prints per-stack instance-size statistics.
+A first approach predicted each neuron's mask independently from a seed point. It worked, but had
+a measured, fundamental flaw: neighboring neurons' masks could physically **overlap** (2–9% on
+real data) because nothing tied the independent predictions together.
 
-## Training
+The current pipeline removes that failure mode by construction:
 
-```
-py scripts/train.py --epochs 30
-```
-
-Useful flags (see `py scripts/train.py --help` for all of them):
-
-| Flag | Meaning |
-|---|---|
-| `--patch-size Z Y X` | training patch size in voxels (default `32 256 256`) |
-| `--base-channels N` | U-Net width (default 24) |
-| `--samples-per-instance N` | synthetic seed samples drawn per neuron per epoch |
-| `--batch-size N` | |
-| `--device cuda\|cpu` | default: auto-detect |
-| `--exclude-stacks NAME [NAME ...]` | skip these `Training Data/<Stack>` folders entirely (e.g. a stack still using a placeholder annotation) |
-| `--jitter-voxels-zyx Z Y X` | random seed jitter per training sample (default `0 8 8` -- no z jitter, tighter x/y than the original 16; see PLAN.md 2026-07-13) |
-| `--no-lsd` | disable the auxiliary local-shape-descriptor head (on by default -- see `lsd.py`) |
-| `--lsd-weight W` | weight of the LSD loss term added to the Dice+BCE mask loss (default 1.0) |
-| `--lsd-sigma-nm N` | physical radius of the local neighborhood LSDs describe (default 60nm) |
-
-The auxiliary LSD head (`lsd.py`, based on [Sheridan et al. 2023](https://doi.org/10.1038/s41592-022-01711-z))
-predicts local shape statistics (size, center-of-mass offset, coordinate covariance) for the
-seeded instance alongside the mask, sharing the whole decoder and diverging only at the last
-layer. Added specifically so the model has to reason from surrounding context rather than just
-local per-voxel evidence -- the situation this is meant to help with is a real annotation gap
-(e.g. dust obscuring a neuron in one section, so no skeleton node could be placed there even
-though the neuron obviously continues): the paper's own framing is that this makes weak/missing
-local evidence less of a problem, since the network can no longer get away with looking at only
-a few center voxels. A checkpoint trained with the LSD head enabled is not loadable with
-`--no-lsd` or vice versa (the architecture itself differs) -- `train.py` stores which was used,
-and `infer.py`/`phase_b_infer.py` read that back automatically so this isn't something to track
-by hand.
-
-A stack can also be excluded permanently (without needing to remember `--exclude-stacks` every
-run) by dropping an empty `EXCLUDE_FROM_TRAINING` file into its `Training Data/<Stack>/` folder --
-`Juliet_Stack3` is excluded this way (its annotation pass is incomplete; see PLAN.md). Delete that
-file to include the stack again.
-
-**What you'll see:** a one-time "Precomputing seed distributions" progress bar (this cost
-depends only on how many neurons exist, not on patch size or model size -- it doesn't
-repeat during training), then a `tqdm` progress bar per epoch for train and validation
-batches with a running loss, then a one-line summary per epoch:
-
-```
-epoch   3/30 | train_loss 0.4622 | val_loss 0.4726 | val_dice 0.6969 | val_iou 0.5895 | 158.5s (avg 158.9s/epoch, ETA 42.3 min)
+```mermaid
+flowchart LR
+    A[Raw EM volume<br/>windowed tile reads] --> B[3D U-Net<br/>anisotropy-aware]
+    B --> C[Per-voxel affinities<br/>6 offsets]
+    B --> D[Auxiliary LSD head<br/>local shape descriptors]
+    E[VAST skeleton nodes<br/>208 real neurons] --> F
+    C --> F[Seeded mutex watershed<br/>hard partition]
+    F --> G[Per-neuron instance masks<br/>global tree ids]
+    G --> H[VAST-importable<br/>16-bit PNGs]
 ```
 
-The ETA is a live running average of actual epoch time on your machine, recalculated every
-epoch -- it becomes more accurate after the first couple of epochs. All of this is also
-written to `outputs/training_log.csv` as it goes, and checkpoints are saved to
-`outputs/checkpoints/{last,best}.pt` after every epoch, so you can kill training early and
-still have a usable model.
+The network never sees *which* neuron it is looking at — it only predicts, for every voxel and a
+set of neighbor offsets, whether the pair belongs to the same object (an **affinity**). Neuron
+identity is injected only at the final step: **seeded mutex watershed** grows one hard partition
+from the real skeleton nodes as markers. Because it produces a single partition, two different
+neurons *cannot* share a voxel — overlap is structurally impossible, not merely unlikely.
 
-**On CPU-only machines**: real 3D U-Net training is slow without a GPU. Measured on a
-CPU-only laptop: a small config (24x128x128 patch, base_channels=16) ran ~4.7s/batch
-(~23 min/epoch); the *default* config above (32x256x256, base_channels=24) extrapolates to
-roughly hours per epoch on the same hardware -- see [PLAN.md](PLAN.md) section 13 for the
-full numbers. Nothing about the code requires a GPU (device is auto-detected either way),
-but for a real training run, use a CUDA machine; for quick local iteration/debugging on a
-laptop, shrink `--patch-size` and `--base-channels` (and re-time it -- see section 13's
-"timing probe" approach) rather than running the defaults.
+An auxiliary **Local Shape Descriptor** head ([Sheridan et al., 2023](https://doi.org/10.1038/s41592-022-01711-z))
+is trained alongside the affinities, forcing the network to reason from broader context (e.g. to
+carry a neuron across a section obscured by imaging dust) rather than local evidence alone.
 
-There's also a one-time setup cost the first time seed distributions are computed for a given
-`--min-instance-voxels`/seed-bias combo (a distance transform per neuron instance, ~4 minutes
-for the current 3 stacks) -- this is cached to `.cache/seed_dist/` so it's paid once ever per
-machine, not once per run.
+## Results
 
-**Checkpoint loading note**: newer PyTorch (2.6+) defaults `torch.load` to `weights_only=True`,
-which used to reject these checkpoints (they store a few `Path` objects in `args`). Fixed on
-both ends -- `train.py` now stores plain strings, and `infer.py`/`phase_b_infer.py` explicitly
-load with `weights_only=False` (safe: these are checkpoints this codebase produces itself, not
-third-party files) -- so this affects neither old nor new checkpoints going forward.
+- **Validation Dice 0.985** (v3 model) on held-out data.
+- **Nerve ring:** ~28 neurons cleanly separated per section with **0 cross-neuron overlap** — the
+  densest and most connectome-critical region.
+- Runs end-to-end on the full tiled stack via overlapping-tile inference with global-id
+  compositing, producing segmentation directly importable back into VAST.
 
-## Plotting loss curves
+![Training comparison](assets/training_curves.jpg)
 
-```
-py scripts/plot_training_log.py outputs/training_log.csv
-```
+> Iterative model development (v2 → v3): adding a sixth annotated stack and stronger augmentation
+> gave consistently lower validation loss and the best val Dice (0.9849).
 
-Reads any `training_log.csv` written by `train.py` and saves `loss_curves.png` (train/val
-loss + val Dice/IoU) next to it. No GPU or training data needed -- just the CSV file, so
-this can be run anywhere, including a different machine than the one that trained.
+## Engineering highlights
 
-## Inference (validation-style, within a Training Data stack)
+Beyond the model, a large part of the work was making messy, undocumented, multi-hundred-GB
+microscopy data usable:
 
-```
-py scripts/infer.py --checkpoint outputs/checkpoints/best.pt --stack-name Catherine_Stack1 --seed-zyx 30 400 400
-```
+- **Reverse-engineered two proprietary data formats** from scratch — webKnossos WKW volume
+  annotations and VAST's tiled multi-resolution pyramid — verifying each decode against the tools'
+  own recorded anchor points (byte-exact tile stitching, content-hashed decode cache).
+- **Windowed, out-of-core reader** for a volume 100× too large for RAM: only the tiles
+  intersecting a requested region are ever touched.
+- **Two full model architectures** implemented, trained, and compared (seeded per-instance vs.
+  affinity+LSD), with the switch driven by a *measured* limitation, not a hunch.
+- **Physically-grounded, anisotropy-aware design** throughout: 2 × 2 × 30 nm voxels mean pooling,
+  affinity offsets, and augmentation all treat the z axis (15× coarser) differently from in-plane.
+- **Domain-specific augmentation** simulating real serial-section defects (missing/degraded
+  sections, section-to-section misalignment).
+- **Production-minded pipeline**: resumable training with live ETA and CSV logging, tiled
+  inference with a trusted-core halo to avoid boundary artifacts, and a hard-won lesson on Windows
+  multiprocessing + CUDA that shaped the final in-process design.
 
-Crops a patch around the given seed voxel in that stack, runs the model, and saves the
-predicted binary mask patch to `outputs/inference_mask.npy` **and** a viewable PNG to
-`outputs/inference_visualization.png` (raw EM with the predicted mask overlaid across a few
-slices -- this, not the raw `.npy` array, is what to hand someone who asks "what did the
-model predict"). Pass `--visualization ''` to skip the image. This only needs the checkpoint
-file and this repo's `Training Data/` -- no GPU or hard drive required, so it runs fine on a
-laptop as long as the checkpoint has been copied over from wherever training happened.
-
-## Phase B: inference on the full worm with real VAST seeds
-
-Requires the external hard drive attached (the full EM stack + `Data/VAST_skeleton_data.csv`
-are far too large/sensitive to live in this repo's `Training Data/`; see PLAN.md/CLAUDE.md
-for how this was reverse-engineered and verified). Real skeleton seeds already come with
-absolute coordinates in the full stack's own frame, so no coordinate-alignment step is
-needed -- see CLAUDE.md "Building Phase B" for the full story.
-
-```
-py scripts/phase_b_infer.py --checkpoint outputs/checkpoints/best.pt --tree-id 1 --vsvi "F:\ppa_b4v5s13\aligned_stack\volume.vsvi" --max-seeds 20
-```
-
-For one skeleton (`--tree-id`, see `Data/VAST_skeleton_data.csv`), subsamples spaced-out
-seeds along its traced length (default every 500nm, `--target-spacing-nm`), reads a real
-patch per seed straight from the full tiled stack, runs the trained model, and saves packed
-per-seed masks + placement to `outputs/phase_b/tree_<id>/predictions.npz`. `--max-seeds` caps
-how many seeds run, for a quick test instead of a full tree. `--save-example-visualizations N`
-(default 3) also saves `example_node<id>.png` overlay images for a spread of seeds along the
-trace -- worth keeping on, since `predictions.npz` itself only stores packed masks, not the
-raw EM, and the raw EM is only readable while the hard drive is attached; without these PNGs
-saved during the run, producing a viewable image later would mean reading the hard drive
-again. Each overlay slice also gets a purple circle on any real traced skeleton node
-(not just the seed the patch was centered on -- that one's marked separately with a yellow
-x) that happens to fall on that slice, so you can check the prediction against the actual
-annotator trace at a glance. **Not yet built**: merging a tree's per-seed predictions into one full-length mask, and
-a writer for whatever format VAST needs to import a segmentation back in (still unknown --
-see CLAUDE.md).
-
-## Code layout
+## Repository layout
 
 ```
 src/seeded_unet/
-  stack_io.py       discovers/decodes/caches Training Data/<Stack>/ folders; dedups stacks
-                    that share identical raw EM so they never get split across train/val
-  seeds.py          synthetic seed-point sampling (interior-biased) + Gaussian heatmap channel
-  dataset.py        builds the per-neuron instance list, train/val split, patch sampling
-  model.py          anisotropy-aware 3D U-Net (in-plane pooling before z-pooling)
-  losses.py         Dice + BCE loss, Dice/IoU metrics
-  train.py          training CLI
-  infer.py          seed -> mask inference CLI (Phase A, within a Training Data stack)
-  visualize.py      turns a (raw patch, predicted mask) pair into a viewable PNG overlay
-  phase_b_stack.py  windowed reader for the full hard-drive EM stack (VAST's tiled format)
-  vast_skeleton.py  parses Data/VAST_skeleton_data.csv, subsamples seeds along each trace
-  phase_b_infer.py  Phase B inference CLI (real seeds, real full-stack patches)
-scripts/            thin entry points (`train.py`, `infer.py`, `inspect_data.py`,
-                    `phase_b_infer.py`, `plot_training_log.py`)
+  affinity_model.py      anisotropy-aware 3D U-Net (affinity + LSD heads) — current model
+  affinity_targets.py    dense affinity + multi-instance LSD targets
+  affinity_dataset.py    dense random-crop patches with augmentation
+  affinity_train.py      training CLI (checkpointing, resume, CSV logs)
+  affinity_infer.py      GPU forward pass -> per-voxel affinity probabilities
+  watershed.py           seeded mutex watershed (mwatershed) -> instance labels
+  full_stack_export.py   tiled whole-region inference + VAST-importable PNG export
+  slice_regions.py       scopes inference to where neurons actually are (node clumps)
+  augmentations.py       serial-section artifact / misalignment / flip / rotation
+  phase_b_stack.py       windowed out-of-core reader for the full tiled EM stack
+  vast_skeleton.py       parses + subsamples the real VAST skeletons (seeds)
+
+  model.py / dataset.py / seeds.py / lsd.py / infer.py   earlier seeded per-instance model
+scripts/                 thin CLI entry points
 ```
+
+Full design rationale, data findings, and open questions live in [PLAN.md](PLAN.md); the current
+state-of-the-project and pipeline details are in [HANDOFF.md](HANDOFF.md).
+
+## Getting started
+
+```bash
+py -m pip install -r requirements.txt        # Python 3.11; CUDA auto-detected
+py scripts/inspect_data.py                    # decode + sanity-check the training stacks
+py scripts/affinity_train.py --epochs 30      # train the affinity+LSD model
+```
+
+Training discovers every `Training Data/<Stack>/` folder automatically (raw EM slices + one
+webKnossos annotation zip); new stacks just need to be dropped in. Per-epoch metrics stream to
+`outputs_affinity/training_log.csv` and checkpoints to `outputs_affinity/checkpoints/`.
+
+Inference on the full worm additionally needs the external EM drive and `Data/VAST_skeleton_data.csv`
+(too large/sensitive to check in); see [HANDOFF.md](HANDOFF.md) for the full Phase B workflow and
+VAST re-import settings.
+
+## Known limitations & roadmap
+
+- **Membrane bleed in sparse regions.** Where a neuron has no traced neighbor competing in a patch
+  *and* local membranes are faint, the lone seed can flood across under-detected boundaries. This
+  is an affinity-quality (model-level) issue, confirmed *not* fixable by watershed tuning or
+  post-processing. The next planned lever is a **boundary-weighted affinity loss** that up-weights
+  thin membrane voxels.
+- **Scaling the export** across the full z-extent of the nerve ring is in progress.
+
+## References & tools
+
+- Arlo Sheridan et al., *Local shape descriptors for neuron segmentation*, Nature Methods (2023).
+- Mutex watershed via [`mwatershed`](https://github.com/pattonw/mwatershed).
+- [VAST](https://lichtman.rc.fas.harvard.edu/vast/) (Volume Annotation and Segmentation Tool) and
+  [webKnossos](https://webknossos.org/) for the manual annotations.
+
+*EM data and skeleton annotations are the property of the originating lab and are not distributed
+in this repository.*
