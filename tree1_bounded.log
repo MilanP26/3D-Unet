@@ -1,0 +1,4 @@
+distance-bounded 176 patches at 250nm
+canvas z[654:867] start_x=33103 start_y=15530 tile 13063x3009
+wrote 191 bounded PNGs (z662-852); filename bounded_z%05d.png start_x=33103 start_y=15530 tile 13063x3009
+DONE

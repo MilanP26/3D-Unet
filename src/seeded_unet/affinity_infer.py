@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-import mwatershed as mws
 
-from .affinity_targets import DEFAULT_OFFSETS
+# Re-exported for backward compatibility -- every existing caller does
+# `from .affinity_infer import ..., seeded_agglomerate`. The implementation lives in
+# watershed.py now, kept deliberately free of any torch import (see that module's
+# docstring for why: parallel watershed worker processes must never touch CUDA).
+from .watershed import seeded_agglomerate  # noqa: F401
 
 
 def run_affinity_inference(
@@ -27,31 +30,3 @@ def run_affinity_inference(
         aff_probs = torch.sigmoid(affinity_logits)[0].cpu().numpy()
         lsd = lsd_pred[0].cpu().numpy() if lsd_pred is not None else None
     return aff_probs, lsd
-
-
-def seeded_agglomerate(
-    aff_probs: np.ndarray,
-    seed_points: dict[int, list[tuple[int, int, int]]],
-    offsets=DEFAULT_OFFSETS,
-) -> np.ndarray:
-    """aff_probs: (num_offsets, Z, Y, X) in [0, 1] (as returned by
-    run_affinity_inference). seed_points: {real_instance_id: [(z, y, x), ...]}
-    -- one or more real seed voxels per neuron, e.g. real VAST skeleton nodes
-    or, for the Training Data prototype, ground-truth-sampled interior points.
-
-    mwatershed's convention is signed affinities (positive = same instance,
-    negative = different), so probs are rescaled from [0, 1] to [-1, 1]
-    first. Any nonzero seed voxel is guaranteed to keep its given id in the
-    output, and everything else is grown/merged from there via mutex
-    watershed -- so two different real neurons structurally cannot end up
-    sharing an id, unlike two independently-thresholded seeded masks."""
-    shape = aff_probs.shape[1:]
-    signed = (2.0 * aff_probs - 1.0).astype(np.float64)
-
-    seeds = np.zeros(shape, dtype=np.uint64)
-    for instance_id, points in seed_points.items():
-        for z, y, x in points:
-            if 0 <= z < shape[0] and 0 <= y < shape[1] and 0 <= x < shape[2]:
-                seeds[z, y, x] = instance_id
-
-    return mws.agglom(signed, offsets, seeds=seeds)

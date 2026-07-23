@@ -24,16 +24,36 @@ explicit cross-tile identity reconciliation is needed for seeded (real) neurons.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from .affinity_infer import run_affinity_inference, seeded_agglomerate
+from .affinity_infer import run_affinity_inference
+from .watershed import seeded_agglomerate
 
 MAX_TILE_XY = 768  # in-plane size safe for one forward pass, with headroom under what has
 # already been confirmed to run cleanly ((12, 512, 512) and (40, 462, 371) windows)
 TILE_OVERLAP = 128  # halo discarded from each tile's edge before compositing
+
+
+def _labels_to_tile_out(
+    pred_labels: np.ndarray, known_ids: set, keep_orphans: bool, next_orphan_id: int
+) -> tuple[np.ndarray, int]:
+    """Shared by both the sequential and parallel paths below. See process_region's
+    docstring for what keep_orphans changes."""
+    if keep_orphans:
+        tile_out = np.where(np.isin(pred_labels, list(known_ids)), pred_labels, 0) if known_ids else np.zeros_like(pred_labels)
+        orphan_ids = sorted(set(np.unique(pred_labels).tolist()) - known_ids - {0})
+        for oid in orphan_ids:
+            tile_out[pred_labels == oid] = next_orphan_id
+            next_orphan_id += 1
+        return tile_out, next_orphan_id
+    # Only real, known tree ids are trustworthy to export -- everything else (background,
+    # unmerged orphan fragments) becomes 0.
+    tile_out = np.where(np.isin(pred_labels, list(known_ids)), pred_labels, 0) if known_ids else np.zeros_like(pred_labels)
+    return tile_out, next_orphan_id
 
 
 def _tile_1d(lo: int, hi: int, size: int, overlap: int) -> list[tuple[int, int, int, int]]:
@@ -69,9 +89,22 @@ def tile_bbox_2d(
     ]
 
 
+def _report_progress(done: int, total: int, start_time: float, label: str) -> None:
+    elapsed = time.time() - start_time
+    avg = elapsed / done if done else 0.0
+    eta = avg * (total - done)
+    tag = f"[{label}] " if label else ""
+    print(
+        f"{tag}tile {done}/{total} done ({100 * done / total:.0f}%) -- "
+        f"elapsed {elapsed / 60:.1f}min, avg {avg:.1f}s/tile, ETA {eta / 60:.1f}min remaining",
+        flush=True,
+    )
+
+
 def process_region(
     cfg, model, offsets, device, read_region_fn, all_nodes_flat, z0: int, z1: int,
     y0: int, y1: int, x0: int, x1: int, keep_orphans: bool = False,
+    progress_label: str = "", max_tile_xy: int = MAX_TILE_XY, overlap: int = TILE_OVERLAP,
 ) -> np.ndarray:
     """Runs inference over one merged region (z0:z1, y0:y1, x0:x1), tiling internally if it's
     too big for one forward pass. Returns a (z1-z0, y1-y0, x1-x0) int32 label volume,
@@ -79,13 +112,22 @@ def process_region(
 
     By default (keep_orphans=False) this contains ONLY real tree ids (0 = everything else) --
     the safe, exportable case, since mwatershed's auto-generated orphan-fragment ids are
-    arbitrary and not consistent across tiles. Set keep_orphans=True to instead keep every
-    discovered fragment (real or auto-discovered), remapped to fresh small ids that are at
-    least unique across tiles -- useful for visually inspecting the model's own unsupervised
-    discovery, at the cost of a real caveat: an auto-discovered object that happens to span a
-    tile boundary will show up as two different ids on either side of that seam, since
-    (unlike real tree ids) an auto-discovered fragment's identity isn't a global reference
-    that different tiles could agree on independently.
+    arbitrary and not consistent across tiles, AND because keeping them produces tens of
+    thousands of tiny 1-2 voxel boundary fragments that clutter a VAST import (observed
+    directly). Set keep_orphans=True only to inspect the model's own unsupervised discovery,
+    with the caveat that an auto-discovered object spanning a tile boundary shows up as two
+    different ids either side of the seam (unlike real tree ids, which are globally stable).
+
+    A tile with ZERO real seeds skips watershed entirely (background by construction -- the
+    whole point of scoping to slice_regions.py's node clumps).
+
+    Watershed runs DIRECTLY in-process, one tile at a time. An earlier version tried to
+    parallelize it across worker processes / guard it with a subprocess timeout, but on
+    Windows the multiprocessing 'spawn' start method pickling the ~200-450MB affinity array
+    to a child process hangs indefinitely -- which masqueraded for a while as "watershed is
+    mysteriously slow" (a real 4s in-process call showed as a 300s+ subprocess timeout).
+    Direct in-process seeded watershed is fast (~4s for a 12x512x512 seeded tile), so there's
+    no need for either mechanism; simplicity wins.
 
     all_nodes_flat: (tid, x, y, z) arrays (see full_stack_export.build_node_arrays) covering
     every real node from every tree, so each tile's seed lookup is a vectorized bounding-box
@@ -93,10 +135,13 @@ def process_region(
     all_tids, all_x, all_y, all_z = all_nodes_flat
     out = np.zeros((z1 - z0, y1 - y0, x1 - x0), dtype=np.int32)
     next_orphan_id = 10_000  # clear of any real tree id, unique across the whole call
+    tiles = tile_bbox_2d(y0, y1, x0, x1, max_tile_xy=max_tile_xy, overlap=overlap)
+    total_tiles = len(tiles)
+    tag = f"[{progress_label}] " if progress_label else ""
+    print(f"{tag}{total_tiles} tile(s) to process", flush=True)
+    start_time = time.time()
 
-    for ry0, ry1, rx0, rx1, cy0, cy1, cx0, cx1 in tile_bbox_2d(y0, y1, x0, x1):
-        raw_tile = read_region_fn(cfg, (z0, z1), (ry0, ry1), (rx0, rx1))
-
+    def seeds_for_tile(ry0, ry1, rx0, rx1):
         in_tile = (
             (all_z >= z0) & (all_z < z1)
             & (all_y >= ry0) & (all_y < ry1)
@@ -105,26 +150,20 @@ def process_region(
         seed_points: dict[int, list[tuple[int, int, int]]] = {}
         for tid, x, y, z in zip(all_tids[in_tile], all_x[in_tile], all_y[in_tile], all_z[in_tile]):
             seed_points.setdefault(int(tid), []).append((int(z - z0), int(y - ry0), int(x - rx0)))
+        return seed_points
 
-        aff_probs, _lsd = run_affinity_inference(model, raw_tile, device)
-        pred_labels = seeded_agglomerate(aff_probs, seed_points, offsets) if seed_points else np.zeros(raw_tile.shape, dtype=np.int64)
-
-        known_ids = set(seed_points.keys())
-        if keep_orphans:
-            tile_out = np.where(np.isin(pred_labels, list(known_ids)), pred_labels, 0) if known_ids else np.zeros_like(pred_labels)
-            orphan_ids = sorted(set(np.unique(pred_labels).tolist()) - known_ids - {0})
-            for oid in orphan_ids:
-                tile_out[pred_labels == oid] = next_orphan_id
-                next_orphan_id += 1
+    for done_count, (ry0, ry1, rx0, rx1, cy0, cy1, cx0, cx1) in enumerate(tiles, start=1):
+        raw_tile = read_region_fn(cfg, (z0, z1), (ry0, ry1), (rx0, rx1))
+        seed_points = seeds_for_tile(ry0, ry1, rx0, rx1)
+        if not seed_points:
+            pred_labels = np.zeros(raw_tile.shape, dtype=np.int64)
         else:
-            # Only real, known tree ids are trustworthy to export (see docstring) --
-            # everything else (background, unmerged orphan fragments) becomes 0.
-            tile_out = np.where(np.isin(pred_labels, list(known_ids)), pred_labels, 0) if known_ids else np.zeros_like(pred_labels)
-
-        # Composite only this tile's trusted core into the region output, in the region's
-        # own local coordinate frame.
+            aff_probs, _lsd = run_affinity_inference(model, raw_tile, device)
+            pred_labels = seeded_agglomerate(aff_probs, seed_points, offsets)
+        tile_out, next_orphan_id = _labels_to_tile_out(pred_labels, set(seed_points.keys()), keep_orphans, next_orphan_id)
         core = tile_out[:, cy0 - ry0:cy1 - ry0, cx0 - rx0:cx1 - rx0]
         out[:, cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0] = core
+        _report_progress(done_count, total_tiles, start_time, progress_label)
 
     return out
 

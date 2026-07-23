@@ -1,5 +1,10 @@
 # Orientation for an AI agent picking this up
 
+> **START WITH [HANDOFF.md](HANDOFF.md).** It is the current state-of-truth (as of 2026-07-23):
+> the affinity+seeded-watershed pipeline, the v3 model, what works/doesn't, dead ends not to
+> revisit, environment gotchas, and VAST-import details. This CLAUDE.md and PLAN.md below are
+> older background; where they disagree with HANDOFF.md on anything recent, HANDOFF.md wins.
+
 Read this first. Full rationale lives in [PLAN.md](PLAN.md); usage instructions live in
 [README.md](README.md). This file is the "what's actually done, what to do next" summary —
 if it ever disagrees with PLAN.md on a *design* question, PLAN.md wins; update this file to
@@ -47,6 +52,13 @@ pipelines.
     - 2026-07-15 (v2): 60 epochs, `Juliet_Stack3` added (a real second annotation of new raw
       EM, tightened seed jitter — see `dataset.py`), LSD auxiliary task added. This is the most
       recent seeded-model checkpoint; it predates `Elle_Stack1`.
+    - **2026-07-20: `Helena_Stack1`'s annotation zip was replaced with real data** (no longer
+      the placeholder referenced above — verified it now decodes cleanly with 126 instances,
+      up from a placeholder). No `EXCLUDE_FROM_TRAINING` marker was ever used for this stack;
+      its exclusion so far has only been the `--exclude-stacks Helena_Stack1` flag passed
+      explicitly on each run (affinity training runs, clump experiments, etc.) — that flag
+      should be dropped from future runs of both models now that real data is in place. All
+      the `outputs_affinity*` checkpoints described below still predate this update.
 - [x] `scripts/inspect_data.py` — decodes every stack and cross-checks against webKnossos's
       own recorded segment anchor points as a correctness check.
 - [x] **Touching-neuron leakage quantified** (2026-07-15/16, PLAN.md §9): both on Phase A

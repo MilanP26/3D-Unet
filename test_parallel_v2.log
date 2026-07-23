@@ -1,0 +1,2 @@
+device: cuda
+4 tile(s) to process (n_workers=4)

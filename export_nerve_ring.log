@@ -1,4 +1,32 @@
 device: cuda
 processing largest region: bbox x[41610:51257] y[12689:15712] (9647x3023), z=[488,520)
 checkpoint epoch 29
-~80 tiles expected
+[nerve_ring] 75 tile(s) to process (n_workers=1)
+[nerve_ring] tile 1/75 done (1%) -- elapsed 0.3min, avg 20.9s/tile, ETA 25.7min remaining
+[nerve_ring] tile 2/75 done (3%) -- elapsed 0.5min, avg 13.8s/tile, ETA 16.8min remaining
+[nerve_ring] tile 3/75 done (4%) -- elapsed 29.6min, avg 591.5s/tile, ETA 709.8min remaining
+[nerve_ring] tile 4/75 done (5%) -- elapsed 62.7min, avg 941.1s/tile, ETA 1113.7min remaining
+[nerve_ring] tile 5/75 done (7%) -- elapsed 105.7min, avg 1268.2s/tile, ETA 1479.5min remaining
+[nerve_ring] tile 6/75 done (8%) -- elapsed 173.2min, avg 1732.1s/tile, ETA 1991.9min remaining
+[nerve_ring] tile 7/75 done (9%) -- elapsed 234.5min, avg 2009.6s/tile, ETA 2277.6min remaining
+[nerve_ring] tile 8/75 done (11%) -- elapsed 302.2min, avg 2266.3s/tile, ETA 2530.8min remaining
+[nerve_ring] tile 9/75 done (12%) -- elapsed 395.9min, avg 2639.0s/tile, ETA 2902.9min remaining
+[nerve_ring] tile 10/75 done (13%) -- elapsed 477.4min, avg 2864.4s/tile, ETA 3103.1min remaining
+[nerve_ring] tile 11/75 done (15%) -- elapsed 477.8min, avg 2606.1s/tile, ETA 2779.8min remaining
+[nerve_ring] tile 12/75 done (16%) -- elapsed 478.2min, avg 2391.0s/tile, ETA 2510.5min remaining
+[nerve_ring] tile 13/75 done (17%) -- elapsed 478.4min, avg 2207.8s/tile, ETA 2281.4min remaining
+[nerve_ring] tile 14/75 done (19%) -- elapsed 478.5min, avg 2050.8s/tile, ETA 2085.0min remaining
+[nerve_ring] tile 15/75 done (20%) -- elapsed 478.7min, avg 1914.8s/tile, ETA 1914.8min remaining
+[nerve_ring] tile 16/75 done (21%) -- elapsed 509.6min, avg 1910.9s/tile, ETA 1879.0min remaining
+[nerve_ring] tile 17/75 done (23%) -- elapsed 538.4min, avg 1900.3s/tile, ETA 1837.0min remaining
+[nerve_ring] tile 18/75 done (24%) -- elapsed 591.2min, avg 1970.7s/tile, ETA 1872.2min remaining
+[nerve_ring] tile 19/75 done (25%) -- elapsed 631.3min, avg 1993.4s/tile, ETA 1860.5min remaining
+[nerve_ring] tile 20/75 done (27%) -- elapsed 663.6min, avg 1990.9s/tile, ETA 1825.0min remaining
+[nerve_ring] tile 21/75 done (28%) -- elapsed 695.1min, avg 1986.0s/tile, ETA 1787.4min remaining
+[nerve_ring] tile 22/75 done (29%) -- elapsed 739.4min, avg 2016.7s/tile, ETA 1781.4min remaining
+[nerve_ring] tile 23/75 done (31%) -- elapsed 782.6min, avg 2041.6s/tile, ETA 1769.4min remaining
+[nerve_ring] tile 24/75 done (32%) -- elapsed 850.0min, avg 2125.0s/tile, ETA 1806.2min remaining
+[nerve_ring] tile 25/75 done (33%) -- elapsed 915.2min, avg 2196.6s/tile, ETA 1830.5min remaining
+[nerve_ring] tile 26/75 done (35%) -- elapsed 957.2min, avg 2209.0s/tile, ETA 1804.0min remaining
+[nerve_ring] tile 27/75 done (36%) -- elapsed 996.3min, avg 2214.0s/tile, ETA 1771.2min remaining
+[nerve_ring] tile 28/75 done (37%) -- elapsed 1055.4min, avg 2261.5s/tile, ETA 1771.5min remaining
